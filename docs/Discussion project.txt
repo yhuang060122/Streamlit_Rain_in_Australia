@@ -1,0 +1,86 @@
+Salut,
+
+Comme convenu, je vous envoie mon brouillon de rapport qui couvre entièrement les étapes 1 et 2, ainsi que les premiers résultats de l'étape 3 (modélisation). Vous trouverez aussi mes notebooks pour chaque partie.
+
+Pour l'étape 2, j'ai documenté et justifié chaque décision de pré-traitement, avec les tests statistiques à l'appui. Pour vous éviter de tout parcourir dans le rapport, voici le récapitulatif de mes choix, avec la raison en bref :
+
+Suppression des 4 variables à plus de 40% de valeurs manquantes (Sunshine, Evaporation, Cloud3pm, Cloud9am) : imputer autant reviendrait à fabriquer la variable.
+Suppression des lignes sans variable cible (RainTomorrow) : inutilisables en supervisé.
+Découpage train/test (80/20, stratifié) avant toute transformation : pour éviter la fuite de données.
+Imputation médiane / moyenne / mode selon la distribution, calculée sur le train uniquement : la médiane résiste aux extrêmes, le mode est adapté aux catégories.
+Valeurs aberrantes conservées après détection par IQR : ce sont de vrais extrêmes météo, pas des erreurs.
+Création de Month, Season et des écarts intra-journaliers (température, humidité, pression) : pour capter la saisonnalité et la dynamique de la journée.
+Encodage : one-hot (N-1) pour les directions du vent et la saison ; encodage par la cible pour Location (49 localités condensées en une variable, le one-hot en aurait créé 48) ; binaire pour RainToday et la cible.
+Mise à l'échelle Standard ou Robust selon la normalité, testée par Jarque-Bera et QQ-plots : Robust pour les variables asymétriques, Standard pour les quasi normales.
+
+Quelques points sur lesquels on devrait s'aligner d'ici lundi soir, car nos approches diffèrent un peu :
+Le modèle final : un seul (XGBoost) ou plusieurs modèles comparés ? Ça détermine le pré-traitement à garder.
+Les variables très lacunaires : les garder (XGBoost gère les manquants) ou les supprimer ?
+La ou les métriques d'évaluation communes (F1, ROC-AUC, PR-AUC).
+La gestion du déséquilibre : pondération des classes ou rééchantillonnage type SMOTE ? Idéalement en comparant les deux sur une métrique commune.
+Le périmètre : pluie à J+1 seulement, ou aussi J+2 et la température ?
+Le décisions finales sur le  pré-traitement.
+
+De mon côté, mes premiers résultats confirment XGBoost comme meilleur modèle (ROC-AUC 0,89 avec les réglages par défaut). Pour la suite je vais procéder à l'optimisation des hyperparamètres, validation croisée, et extension aux autres objectifs. 
+
+Bonne fin de week-end, et à lundi !
+
+-----
+
+Bonsoir,
+
+Comme discuté, vous trouverez ci-dessous le mail résumant le point d’aujourd’hui :
+
+Sur les choix de pre-traitements:
+Suppression des 4 variables à plus de 40% de valeurs manquantes (Sunshine, Evaporation, Cloud3pm, Cloud9am) : imputer autant reviendrait à fabriquer la variable ==> OKAY
+Suppression des lignes sans variable cible (RainTomorrow) : inutilisables en supervisé. ==> OKAY
+Découpage train/test (80/20, stratifié) avant toute transformation : pour éviter la fuite de données. ==> OKAY
+Imputation médiane / moyenne / mode selon la distribution, calculée sur le train uniquement : la médiane résiste aux extrêmes, le mode est adapté aux catégories. ==> On pourrait également envisager de calculer la médiane et le mode par localité afin de mieux prendre en compte les effets géographiques:
+
+------------------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------------------
+numerical_column = X1_train.select_dtypes(include = ['float64']).columns.tolist()
+
+for location in X1_train['Location'].unique():
+    df_location = X1_train[X1_train['Location']==location]
+    for var in numerical_column:
+        if((var!='RainToday') and (var!='Rainfall')):
+            median = X1_train[X1_train['Location']==location][var].dropna().median()
+
+            X1_train.loc[X1_train['Location'] == location, var] = X1_train.loc[X1_train['Location'] == location, var].fillna(median)
+------------------------------------------------------------------------------------------------------------------------------------------categorical_column = ['WindGustDir', 'WindDir9am', 'WindDir3pm']
+
+for location in X1_train['Location'].unique():
+    loc_mask = X1_train['Location'] == location
+    for var in categorical_column:
+        pct_nan = round(100 * X1_train.loc[loc_mask, var].isna().sum() / loc_mask.sum(), 1)
+        if pct_nan < 100:
+            mode = X1_train.loc[loc_mask, var].dropna().mode()[0]
+            X1_train.loc[loc_mask, var] = X1_train.loc[loc_mask, var].fillna(mode)
+        else:
+            # a few locations have 100% missing WindGustDir - fall back to the WindDir9am mode there - it is quite questionable
+            mode = X1_train.loc[loc_mask, 'WindDir9am'].mode()[0]
+            X1_train.loc[loc_mask, var] = X1_train.loc[loc_mask, var].fillna(mode)
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Valeurs aberrantes conservées après détection par IQR : ce sont de vrais extrêmes météo, pas des erreurs. ==> OKAY
+Création de Month, Season et des écarts intra-journaliers (température, humidité, pression) : pour capter la saisonnalité et la dynamique de la journée. ==> OKAY
+Encodage : one-hot (N-1) pour les directions du vent et la saison ; encodage par la cible pour Location (49 localités condensées en une variable, le one-hot en aurait créé 48) ; binaire pour RainToday et la cible. ==>OKAY
+Mise à l'échelle Standard ou Robust selon la normalité, testée par Jarque-Bera et QQ-plots : Robust pour les variables asymétriques, Standard pour les quasi normales. ==>OKAY
+
+Nous sommes tous d’accord sur la méthode de prétraitement des données.
+
+Les points sur lesquels on devait s'aligner:
+
+Le modèle final : un seul (XGBoost) ou plusieurs modèles comparés ? Ça détermine le pré-traitement à garder:
+Dans le rapport, présenter plusieurs modèles afin de montrer que XGBoost est le meilleur choix. Pour le modèle final, conserver uniquement XGBoost, pour les raisons suivantes :meilleurs résultats ;temps d’exécution rapide ;nécessite peu de prétraitement.À confirmer / discuter avec Antoine.
+
+Les variables très lacunaires : les garder (XGBoost gère les manquants) ou les supprimer? 
+Si on ne garde que XGBoost, on peut les supprimer. 
+La ou les métriques d'évaluation communes (F1, ROC-AUC, PR-AUC):
+Les trois semblent pertinents. Il faudrait se renseigner et en discuter avec Antoine pour voir s’il serait possible d’ajouter un biais afin d’augmenter les faux positifs : autrement dit, faire en sorte que le modèle privilégie la prédiction « il va pleuvoir demain alors qu’il ne pleuvra pas » plutôt que « il ne va pas pleuvoir demain alors qu’il pleuvra ».
+La gestion du déséquilibre : pondération des classes ou rééchantillonnage type SMOTE ? Idéalement en comparant les deux sur une métrique commune.
+Présentation rapide sur la base du notebook d’Axelle. 
+Le rééchantillonnage a très peu d’impact sur la qualité des prédictions de XGBoost. 
+Un rééchantillonnage avec SMOTE semble avoir un effet bénéfique pour le modèle Random Forest.Action Nicolas J. : fournir un script et une analyse propres sur le rééchantillonnage.
+Le périmètre : pluie à J+1 seulement, ou aussi J+2 et la température?
+Je propose de faire au moins J+2, car cela ne demande pas beaucoup d’efforts supplémentaires.
