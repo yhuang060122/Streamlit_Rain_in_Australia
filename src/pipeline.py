@@ -18,6 +18,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+import streamlit as st
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -59,7 +60,13 @@ def get_season_sh(month: int) -> str:
     return "Spring"
 
 
+@st.cache_data(show_spinner=False)
 def load_raw(path=DATA_PATH) -> pd.DataFrame:
+    """Load the raw weatherAUS.csv once and share it across the whole app.
+
+    This is the single source of truth: EDA, Data Preprocessing, Feature Engineering
+    and model training all consume this same cached DataFrame (in Streamlit).
+    """
     return pd.read_csv(path, na_values=["NA"])
 
 
