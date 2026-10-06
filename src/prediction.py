@@ -39,7 +39,7 @@ def render() -> None:
     models = load_models()
     df_eng, _ = get_engineered()
 
-    tabs = st.tabs(["📅 Historical Replay", "✍️ Manual Input"])
+    tabs = st.tabs(["📅 Historical Replay", "✍️ Manual Input", "🧠 Model & Parameters"])
 
     # ---------------------------------------------------------------- tab 1
     with tabs[0]:
@@ -225,3 +225,117 @@ def render() -> None:
             with colR:
                 rain_bar(pred["RainInTwoDays"], "Rain in 2 days probability")
                 st.metric("Max temp in 2 days", f"{pred['MaxTempInTwoDays']:.1f} °C")
+
+    # ---------------------------------------------------------------- tab 3
+    with tabs[2]:
+        st.subheader("How the model works")
+
+        st.markdown(
+            "The predictions come from **XGBoost** (eXtreme Gradient Boosting), a gradient-boosted "
+            "decision-tree ensemble. One model is trained per target in `src/pipeline.py` and saved to "
+            "`models/*.joblib`; this page loads them and applies them to your inputs."
+        )
+
+        st.markdown(
+            "**Why XGBoost?** On the Modelling page it beat the logistic-regression and random-forest "
+            "baselines on F1 / ROC-AUC, and it fits this dataset well:"
+        )
+        st.markdown(
+            "- **Missing values handled natively** — the weather records are full of gaps, so no manual imputation is needed.\n"
+            "- **Categorical features handled natively** (`enable_categorical=True`) — Location, wind directions, season.\n"
+            "- **Class imbalance handled** via `scale_pos_weight` — only ~22% of days have rain.\n"
+            "- **Regularised** (`reg_lambda` / `reg_alpha`) — keeps 200k+ noisy rows from overfitting."
+        )
+
+        # ---- the four models
+        st.markdown("### The four models")
+        model_table = pd.DataFrame(
+            [
+                {"Target": "RainTomorrow", "Task": "Binary classification", "Model": "XGBClassifier", "Output": "P(rain tomorrow)"},
+                {"Target": "RainInTwoDays", "Task": "Binary classification", "Model": "XGBClassifier", "Output": "P(rain in 2 days)"},
+                {"Target": "MaxTempTomorrow", "Task": "Regression", "Model": "XGBRegressor", "Output": "Max temp tomorrow (°C)"},
+                {"Target": "MaxTempInTwoDays", "Task": "Regression", "Model": "XGBRegressor", "Output": "Max temp in 2 days (°C)"},
+            ]
+        )
+        st.dataframe(model_table, width="stretch", hide_index=True)
+
+        # ---- hyperparameters
+        st.markdown("### Hyperparameters")
+        st.markdown(
+            "Shared by all four models (see `_classifier` / `_regressor` in `src/pipeline.py`). "
+            "They were chosen for a good speed / accuracy trade-off rather than grid-searched."
+        )
+        spw = meta["metrics"]["RainTomorrow"]["pos_rate_train"]
+        spw_val = round((1 - spw) / spw, 2)
+        params_table = pd.DataFrame(
+            [
+                {"Parameter": "n_estimators", "Value": "400", "Meaning": "Number of boosting trees. More trees = stronger model, up to a point."},
+                {"Parameter": "learning_rate", "Value": "0.05", "Meaning": "Shrinkage per tree. Small rate + many trees = stable, accurate learning."},
+                {"Parameter": "max_depth", "Value": "6", "Meaning": "Maximum depth of each tree. Caps complexity to avoid memorising noise."},
+                {"Parameter": "subsample", "Value": "0.85", "Meaning": "Fraction of rows sampled per tree (adds randomness against overfitting)."},
+                {"Parameter": "colsample_bytree", "Value": "0.85", "Meaning": "Fraction of features sampled per tree."},
+                {"Parameter": "min_child_weight", "Value": "5", "Meaning": "Minimum sample weight per leaf. Larger = more conservative splits."},
+                {"Parameter": "reg_lambda", "Value": "5.0", "Meaning": "L2 regularisation on leaf weights (smooths the model)."},
+                {"Parameter": "reg_alpha", "Value": "0.1", "Meaning": "L1 regularisation on leaf weights (encourages sparsity)."},
+                {"Parameter": "scale_pos_weight", "Value": f"≈ {spw_val} (classification only)", "Meaning": "Weights the minority (rain) class — negative/positive ratio of the training set."},
+                {"Parameter": "tree_method", "Value": "hist", "Meaning": "Histogram-based split finding — much faster, near-identical accuracy."},
+                {"Parameter": "enable_categorical", "Value": "True", "Meaning": "Treats categorical columns natively instead of one-hot encoding."},
+                {"Parameter": "eval_metric", "Value": "aucpr / mae", "Meaning": "Training-time metric: area under the PR curve (classification) or mean absolute error (regression)."},
+                {"Parameter": "random_state", "Value": "42", "Meaning": "Random seed so training is reproducible."},
+            ]
+        )
+        st.dataframe(
+            params_table,
+            width="stretch",
+            hide_index=True,
+            column_config={"Meaning": st.column_config.TextColumn(width="large")},
+        )
+
+        # ---- evaluation metrics
+        st.markdown("### Evaluation metrics (held-out test set)")
+        m = meta["metrics"]
+        cls_rows, reg_rows = [], []
+        for tgt, d in m.items():
+            if d["type"] == "classification":
+                cls_rows.append(
+                    {
+                        "Target": tgt,
+                        "ROC-AUC": d["roc_auc"],
+                        "F1": d["f1"],
+                        "Precision": d["precision"],
+                        "Recall": d["recall"],
+                        "Accuracy": d["accuracy"],
+                    }
+                )
+            else:
+                reg_rows.append(
+                    {
+                        "Target": tgt,
+                        "MAE (°C)": d["mae"],
+                        "RMSE (°C)": d["rmse"],
+                        "R²": d["r2"],
+                    }
+                )
+
+        st.markdown("**Classification** — how well it separates rain vs no-rain days:")
+        st.dataframe(pd.DataFrame(cls_rows), width="stretch", hide_index=True)
+
+        st.markdown("**Regression** — how close the predicted temperature is:")
+        st.dataframe(pd.DataFrame(reg_rows), width="stretch", hide_index=True)
+
+        # ---- features
+        st.markdown("### Input features")
+        st.markdown(
+            f"All four models consume the same {len(meta['features'])} features. Categorical columns "
+            "(Location, wind directions, season) are encoded natively, not one-hot."
+        )
+        st.markdown(" · ".join(f"`{f}`" for f in meta["features"]))
+
+        # ---- feature importance
+        imp = meta.get("importance_rain_tomorrow", {})
+        if imp:
+            top = sorted(imp.items(), key=lambda kv: kv[1], reverse=True)[:8]
+            imp_rows = [{"Feature": k, "Importance": round(v, 4)} for k, v in top]
+            st.markdown("### What drives the rain prediction")
+            st.markdown("Top-8 gain-based feature importances for the RainTomorrow model:")
+            st.dataframe(pd.DataFrame(imp_rows), width="stretch", hide_index=True)
