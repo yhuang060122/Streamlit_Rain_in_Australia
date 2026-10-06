@@ -239,9 +239,12 @@ def render() -> None:
                 "construction, perfectly aligned with `RainTomorrow` (`RISK_MM > 0 ⟺ RainTomorrow = Yes`). "
                 "It must be excluded from modelling — hence the training pipeline drops it."
             )
-            risk = df["RISK_MM"]
-            risk_num = (risk > 0).astype(float).where(risk.notna())
-            st.metric("Correlation of RISK_MM with RainTomorrow", f"{risk_num.corr(target_num):.4f}")
+            risk = df["RISK_MM"] if "RISK_MM" in df.columns else None
+            if risk is not None:
+                risk_num = (risk > 0).astype(float).where(risk.notna())
+                st.metric("Correlation of RISK_MM with RainTomorrow", f"{risk_num.corr(target_num):.4f}")
+            else:
+                st.info("`RISK_MM` is absent from the current dataset — nothing to check.")
 
     # ------------------------------------------------------------------ tab 4
     with tabs[3]:

@@ -87,7 +87,7 @@ def engineer(df: pd.DataFrame) -> pd.DataFrame:
     df["MaxTempTomorrow"] = np.where(gap1 == 1, g["MaxTemp"].shift(-1), np.nan)
     df["MaxTempInTwoDays"] = np.where(gap2 == 2, g["MaxTemp"].shift(-2), np.nan)
 
-    df = df.drop(columns=["RISK_MM"])
+    df = df.drop(columns=["RISK_MM"], errors="ignore")
     return df
 
 
