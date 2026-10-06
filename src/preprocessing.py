@@ -109,8 +109,9 @@ def run_preprocessing(_cache_version: str = _PIPELINE_VERSION) -> dict:
     y_test2 = df_test["RainInTwoDays"].reset_index(drop=True)
 
     out["cutoff"] = CUTOFF_DATE
-    out["dim_train"] = (len(df_train), len(df_train.columns) - 2)
-    out["dim_test"] = (len(df_test), len(df_test.columns) - 2)
+    n_feat_cols = len(df_train.columns) - len(TARGETS)
+    out["dim_train"] = (len(df_train), n_feat_cols)
+    out["dim_test"] = (len(df_test), n_feat_cols)
     out["train_date_min"] = str(df_train["Date"].min().date())
     out["train_date_max"] = str(df_train["Date"].max().date())
     out["test_date_min"] = str(df_test["Date"].min().date())
