@@ -26,7 +26,15 @@ _FORECAST_VERSION = "2026-10-06-spec"
 
 @st.cache_data(show_spinner=False)
 def load_meta(_cache_version: str = _FORECAST_VERSION) -> dict:
-    return json.loads((MODEL_DIR / "meta.json").read_text(encoding="utf-8"))
+    meta = json.loads((MODEL_DIR / "meta.json").read_text(encoding="utf-8"))
+    if "transformer" not in meta:
+        st.error(
+            "`models/meta.json` is stale — it lacks the `transformer` field written by the spec pipeline. "
+            "The trained models and the code are out of sync. Re-train with "
+            "`.venv/Scripts/python.exe -m src.pipeline` and redeploy."
+        )
+        st.stop()
+    return meta
 
 
 @st.cache_resource(show_spinner=False)
