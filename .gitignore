@@ -1,3 +1,5 @@
 .venv
 .workbuddy
 .idea
+__pycache__/
+*.pyc
