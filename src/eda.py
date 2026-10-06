@@ -17,7 +17,7 @@ import streamlit as st
 from scipy.stats import chi2_contingency
 
 from src.gating import mark_done, require
-from src.pipeline import load_raw
+from src.pipeline import COLS_DROP_CORR, COLS_DROP_HIGH_MISSING, CUTOFF_DATE, get_season, load_raw
 
 NUM_COLS = [
     "MinTemp", "MaxTemp", "Rainfall", "Evaporation", "Sunshine",
@@ -54,6 +54,7 @@ def render() -> None:
             "3️⃣ Correlations",
             "4️⃣ Categorical & Geography",
             "5️⃣ Boxplots vs Target",
+            "6️⃣ Pré-traitement Decisions",
         ]
     )
 
@@ -362,3 +363,109 @@ def render() -> None:
         fig.tight_layout()
         st.pyplot(fig)
         plt.close(fig)
+
+    # ------------------------------------------------------------------ tab 6
+    with tabs[5]:
+        st.subheader("Pré-traitement decisions (mapped to the spec)")
+        st.caption(
+            "Each block below is the EDA justification for a step in the « Pré-traitement » spec, "
+            "implemented in `src/pipeline.py`."
+        )
+
+        dates = pd.to_datetime(df["Date"])
+
+        # ---- 1. temporal split ----
+        st.markdown("### 1. Temporal split")
+        cutoff = pd.Timestamp(CUTOFF_DATE)
+        n_train, n_test = int((dates <= cutoff).sum()), int((dates > cutoff).sum())
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Data range", f"{dates.min():%Y-%m-%d} → {dates.max():%Y-%m-%d}")
+        c2.metric("Train (≤ cutoff)", f"{n_train:,}")
+        c3.metric("Test (> cutoff)", f"{n_test:,}")
+        st.info(
+            f"Cutoff = **{CUTOFF_DATE}**. For daily time series, validation must be temporal: a random split "
+            "would put consecutive, nearly-identical days on both sides, so the model gets tested on days it "
+            "almost saw in training, and its scores are overestimated."
+        )
+        cum = dates.value_counts().sort_index().cumsum()
+        fig, ax = plt.subplots(figsize=(11, 4))
+        ax.plot(cum.index, cum.values, color="#2563eb")
+        ax.axvline(cutoff, color="red", linestyle="--", linewidth=1.5, label=f"cutoff {CUTOFF_DATE}")
+        ax.set_title("Cumulative rows over time")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Cumulative rows")
+        ax.legend()
+        sns.despine()
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+
+        # ---- 2. high-missingness ----
+        st.markdown("### 2. High-missingness columns (>20%) — dropped")
+        missing_pct = (df.isna().mean() * 100).round(2)
+        high = missing_pct[missing_pct > 20].sort_values(ascending=False)
+        st.dataframe(
+            high.rename("Missing %").reset_index().rename(columns={"index": "Variable"}),
+            width="stretch", hide_index=True,
+        )
+        st.markdown(f"→ Dropped columns: `{', '.join(COLS_DROP_HIGH_MISSING)}`")
+
+        # ---- 3. correlated pairs ----
+        st.markdown("### 3. Highly correlated pairs (|Pearson| > 0.8) — resolved by dropping 3 columns")
+        corr = df[NUM_COLS].corr()
+        cols = list(NUM_COLS)
+        pairs = []
+        for i in range(len(cols)):
+            for j in range(i + 1, len(cols)):
+                v = corr.iloc[i, j]
+                if abs(v) > 0.8:
+                    pairs.append({"Pair": f"{cols[i]} ↔ {cols[j]}", "Pearson": round(float(v), 4)})
+        pairs = sorted(pairs, key=lambda x: -abs(x["Pearson"]))
+        if pairs:
+            st.dataframe(pd.DataFrame(pairs), width="stretch", hide_index=True)
+        else:
+            st.caption("No pair exceeds |0.8|.")
+        st.markdown(
+            f"→ Dropped columns: `{', '.join(COLS_DROP_CORR)}`. Dropping these three removes every pair above "
+            "(`MaxTemp`↔`Temp3pm`/`Temp9am`, `Pressure9am`↔`Pressure3pm`, `MinTemp`↔`Temp9am`, `Temp9am`↔`Temp3pm`)."
+        )
+
+        # ---- 4. leakage ----
+        st.markdown("### 4. Leakage column RISK_MM")
+        if "RISK_MM" in df.columns:
+            st.warning("`RISK_MM` is present — it is excluded from modelling (leakage).")
+        else:
+            st.success("`RISK_MM` is absent from the dataset — nothing to exclude.")
+
+        # ---- 5. cyclical encoding ----
+        st.markdown("### 5. Cyclical encoding (month / season / wind → sin/cos)")
+        df_t = df.copy()
+        df_t["Month"] = dates.dt.month
+        df_t["Season"] = df_t["Month"].map(get_season)
+        month_rate = (df_t["RainTomorrow"] == "Yes").groupby(df_t["Month"]).mean() * 100
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(month_rate.index, month_rate.values, marker="o", color="#2563eb")
+        ax.set_title("Rain-tomorrow rate by month (cyclical pattern)")
+        ax.set_xlabel("Month")
+        ax.set_ylabel("% RainTomorrow = Yes")
+        ax.set_xticks(range(1, 13))
+        ax.grid(alpha=0.3)
+        sns.despine()
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+        st.caption(
+            "Month is cyclical (December sits next to January), so it is encoded as sin/cos instead of a raw "
+            "1–12 number. `Season` and the 16 wind directions are cyclical too and get the same treatment."
+        )
+
+        # ---- 6. Location target encoding ----
+        st.markdown("### 6. Location target encoding (rain rate per station)")
+        loc_rate = (df["RainTomorrow"] == "Yes").groupby(df["Location"]).mean().sort_values(ascending=False) * 100
+        c1, c2 = st.columns(2)
+        c1.metric("Wettest station", f"{loc_rate.index[0]} ({loc_rate.iloc[0]:.0f}%)")
+        c2.metric("Driest station", f"{loc_rate.index[-1]} ({loc_rate.iloc[-1]:.0f}%)")
+        st.caption(
+            "`Location` is strongly tied to the target, so each station is replaced by its rain rate "
+            "(target encoding) — with one version per horizon (J+1 and J+2)."
+        )
