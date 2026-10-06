@@ -66,7 +66,7 @@ def render() -> None:
 
         st.info(
             "Source: Kaggle **'Rain in Australia'** (`weatherAUS.csv`) — daily weather observations from the "
-            "Australian Bureau of Meteorology (BOM), 49 stations, ~10 years (2007–2026 in this mirror)."
+            "Australian Bureau of Meteorology (BOM), 49 stations, ~10 years (2007–2017)."
         )
 
         st.subheader("First rows")
