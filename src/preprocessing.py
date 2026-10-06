@@ -108,6 +108,10 @@ def run_preprocessing(_cache_version: str = _PIPELINE_VERSION) -> dict:
     y_test = df_test["RainTomorrow"].reset_index(drop=True)
     y_test2 = df_test["RainInTwoDays"].reset_index(drop=True)
 
+    # 供 modelling / interpretation 按站点分析（与 X_test_final 行对齐）
+    out["test_locations"] = df_test["Location"].reset_index(drop=True)
+    out["test_dates"] = df_test["Date"].reset_index(drop=True)
+
     out["cutoff"] = CUTOFF_DATE
     n_feat_cols = len(df_train.columns) - len(TARGETS)
     out["dim_train"] = (len(df_train), n_feat_cols)
