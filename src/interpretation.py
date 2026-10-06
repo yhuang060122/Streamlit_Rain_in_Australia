@@ -122,7 +122,7 @@ def render() -> None:
         plt.close(fig)
 
         st.markdown("#### Single prediction — waterfall")
-        if "interp_idx" not in st.session_state:
+        if "interp_idx" not in st.session_state or st.session_state["interp_idx"] >= len(X):
             st.session_state["interp_idx"] = int(np.random.default_rng(0).integers(len(X)))
         if st.button("🎲 Random sample"):
             st.session_state["interp_idx"] = int(np.random.default_rng().integers(len(X)))
