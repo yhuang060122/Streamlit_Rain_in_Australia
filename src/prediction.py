@@ -11,16 +11,18 @@ import pandas as pd
 import streamlit as st
 
 from src.forecast import actual_summary, get_engineered, load_meta, load_models, predict_row, rain_bar
-from src.pipeline import MODEL_DIR, SEASONS, WIND_DIRS, cast_categories
+from src.pipeline import MODEL_DIR, WIND_DIRS
 
 # default values + fallback for missing values when sampling a random observation
+# (MaxTemp / Evaporation / Sunshine / Cloud* are dropped by the spec pipeline)
 NUM_DEFAULTS = {
-    "MinTemp": 12.0, "MaxTemp": 23.0, "Temp9am": 17.0, "Temp3pm": 22.0,
+    "MinTemp": 12.0, "Temp9am": 17.0, "Temp3pm": 22.0,
     "Humidity9am": 70.0, "Humidity3pm": 52.0, "Pressure9am": 1017.0, "Pressure3pm": 1015.0,
     "WindGustSpeed": 40.0, "WindSpeed9am": 13.0, "WindSpeed3pm": 19.0,
-    "Rainfall": 0.0, "Evaporation": 5.0, "Sunshine": 7.6, "Cloud9am": 4.0, "Cloud3pm": 4.0,
+    "Rainfall": 0.0,
 }
 WIND_DEFAULTS = {"WindGustDir": "W", "WindDir9am": "N", "WindDir3pm": "NW"}
+MONTHS = list(range(1, 13))
 
 
 def render() -> None:
@@ -37,14 +39,15 @@ def render() -> None:
 
     meta = load_meta()
     models = load_models()
-    df_eng, _ = get_engineered()
+    df_eng = get_engineered()
+    locations = sorted(df_eng["Location"].dropna().unique().tolist())
 
     tabs = st.tabs(["📅 Historical Replay", "✍️ Manual Input", "🧠 Model & Parameters"])
 
     # ---------------------------------------------------------------- tab 1
     with tabs[0]:
         def _random_hr_date() -> None:
-            loc = st.session_state.get("hr_station", meta["locations"][0])
+            loc = st.session_state.get("hr_station", locations[0])
             avail = (
                 df_eng.loc[df_eng["Location"] == loc]
                 .dropna(subset=["RainTomorrow"])["Date"]
@@ -62,7 +65,7 @@ def render() -> None:
         )
 
         c1, c2 = st.columns(2)
-        location = c1.selectbox("Station", meta["locations"], key="hr_station")
+        location = c1.selectbox("Station", locations, key="hr_station")
 
         loc_df = df_eng[df_eng["Location"] == location]
         avail_dates = loc_df[loc_df["RainTomorrow"].notna()]["Date"].dt.date
@@ -153,7 +156,7 @@ def render() -> None:
                 st.session_state[f"mi_{f}"] = str(v) if pd.notna(v) else WIND_DEFAULTS[f]
             st.session_state["mi_RainToday"] = "Yes" if sample["RainToday"] == 1 else "No"
             st.session_state["mi_location"] = str(sample["Location"])
-            st.session_state["mi_season"] = str(sample["season"])
+            st.session_state["mi_month"] = int(sample["Date"].month)
 
         title_c, btn_c = st.columns([5, 1])
         title_c.subheader("Manual input")
@@ -161,7 +164,7 @@ def render() -> None:
 
         st.caption(
             "Enter today's observations to predict tomorrow's and the day-after's rain and max temperature. "
-            "Missing values (NaN) are supported — XGBoost handles them natively. Use Random to fill the form "
+            "Missing values are imputed per-station (fitted on the training set). Use Random to fill the form "
             "with a real historical observation."
         )
 
@@ -171,20 +174,19 @@ def render() -> None:
         for f, d in WIND_DEFAULTS.items():
             st.session_state.setdefault(f"mi_{f}", d)
         st.session_state.setdefault("mi_RainToday", "No")
-        st.session_state.setdefault("mi_location", meta["locations"][0])
-        st.session_state.setdefault("mi_season", "Summer")
+        st.session_state.setdefault("mi_location", locations[0])
+        st.session_state.setdefault("mi_month", 1)
 
         c1, c2 = st.columns(2)
-        location = c1.selectbox("Location", meta["locations"], key="mi_location")
-        season = c2.selectbox("Season", SEASONS, key="mi_season")
+        location = c1.selectbox("Location", locations, key="mi_location")
+        month = c2.selectbox("Month", MONTHS, key="mi_month")
 
-        inp = {"Location": location, "season": season}
+        inp = {"Location": location, "Date": pd.Timestamp(year=2000, month=month, day=15)}
 
-        c = st.columns(4)
+        c = st.columns(3)
         inp["MinTemp"] = c[0].number_input("Min temp (°C)", -20.0, 50.0, key="mi_MinTemp")
-        inp["MaxTemp"] = c[1].number_input("Max temp (°C)", -20.0, 50.0, key="mi_MaxTemp")
-        inp["Temp9am"] = c[2].number_input("Temp 9am (°C)", -20.0, 50.0, key="mi_Temp9am")
-        inp["Temp3pm"] = c[3].number_input("Temp 3pm (°C)", -20.0, 55.0, key="mi_Temp3pm")
+        inp["Temp9am"] = c[1].number_input("Temp 9am (°C)", -20.0, 50.0, key="mi_Temp9am")
+        inp["Temp3pm"] = c[2].number_input("Temp 3pm (°C)", -20.0, 55.0, key="mi_Temp3pm")
 
         c = st.columns(4)
         inp["Humidity9am"] = c[0].number_input("Humidity 9am (%)", 0.0, 100.0, key="mi_Humidity9am")
@@ -205,16 +207,8 @@ def render() -> None:
         rain_today = c[3].selectbox("Rained today?", ["No", "Yes"], key="mi_RainToday")
         inp["RainToday"] = 1 if rain_today == "Yes" else 0
 
-        c = st.columns(4)
-        inp["Evaporation"] = c[0].number_input("Evaporation (mm)", 0.0, 150.0, key="mi_Evaporation")
-        inp["Sunshine"] = c[1].number_input("Sunshine (h)", 0.0, 15.0, key="mi_Sunshine")
-        inp["Cloud9am"] = c[2].number_input("Cloud 9am (oktas)", 0.0, 9.0, key="mi_Cloud9am")
-        inp["Cloud3pm"] = c[3].number_input("Cloud 3pm (oktas)", 0.0, 9.0, key="mi_Cloud3pm")
-
         if st.button("🔮 Predict", type="primary"):
             X_row = pd.DataFrame([inp])
-            cat_dtypes = {k: pd.CategoricalDtype(categories=v) for k, v in meta["cat_dtypes"].items()}
-            X_row = cast_categories(X_row, cat_dtypes)
             pred = predict_row(models, meta, X_row)
 
             st.markdown("### Predictions")
@@ -238,13 +232,13 @@ def render() -> None:
 
         st.markdown(
             "**Why XGBoost?** On the Modelling page it beat the logistic-regression and random-forest "
-            "baselines on F1 / ROC-AUC, and it fits this dataset well:"
+            "baselines on F1 / ROC-AUC. Features are engineered first (temporal split, per-station imputation, "
+            "trig + target encoding — see the Data Preprocessing / Feature Engineering pages), then fed to XGBoost:"
         )
         st.markdown(
-            "- **Missing values handled natively** — the weather records are full of gaps, so no manual imputation is needed.\n"
-            "- **Categorical features handled natively** (`enable_categorical=True`) — Location, wind directions, season.\n"
             "- **Class imbalance handled** via `scale_pos_weight` — only ~22% of days have rain.\n"
-            "- **Regularised** (`reg_lambda` / `reg_alpha`) — keeps 200k+ noisy rows from overfitting."
+            "- **Regularised** (`reg_lambda` / `reg_alpha`) — keeps 110k+ noisy rows from overfitting.\n"
+            "- **Tree ensemble** — captures non-linear interactions (humidity, pressure, rainfall) that linear models miss."
         )
 
         # ---- the four models
@@ -279,7 +273,6 @@ def render() -> None:
                 {"Parameter": "reg_alpha", "Value": "0.1", "Meaning": "L1 regularisation on leaf weights (encourages sparsity)."},
                 {"Parameter": "scale_pos_weight", "Value": f"≈ {spw_val} (classification only)", "Meaning": "Weights the minority (rain) class — negative/positive ratio of the training set."},
                 {"Parameter": "tree_method", "Value": "hist", "Meaning": "Histogram-based split finding — much faster, near-identical accuracy."},
-                {"Parameter": "enable_categorical", "Value": "True", "Meaning": "Treats categorical columns natively instead of one-hot encoding."},
                 {"Parameter": "eval_metric", "Value": "aucpr / mae", "Meaning": "Training-time metric: area under the PR curve (classification) or mean absolute error (regression)."},
                 {"Parameter": "random_state", "Value": "42", "Meaning": "Random seed so training is reproducible."},
             ]
@@ -326,8 +319,9 @@ def render() -> None:
         # ---- features
         st.markdown("### Input features")
         st.markdown(
-            f"All four models consume the same {len(meta['features'])} features. Categorical columns "
-            "(Location, wind directions, season) are encoded natively, not one-hot."
+            f"All four models consume the same {len(meta['features'])} features. Categorical inputs are "
+            "pre-encoded: wind directions / month / season → sin/cos (trig), Location → per-target rain-rate "
+            "(target encoding)."
         )
         st.markdown(" · ".join(f"`{f}`" for f in meta["features"]))
 

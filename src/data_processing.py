@@ -30,9 +30,9 @@ def render() -> None:
 
     st.title("🧹 Data Preprocessing")
     st.caption(
-        "Reproduces the cleaning part of `docs/02_preprocessing_avec_2jours_prediction.ipynb`: missing values, "
-        "column drop, two-day target, stratified split, IQR detection, imputation. Feature engineering, "
-        "encoding and scaling are on the **Feature Engineering** page."
+        "Reproduces the cleaning part of the « Pré-traitement » spec: missing values, "
+        "column drop, two-day target, temporal split (train ≤ 2015-11-09), IQR detection, per-station "
+        "imputation. Feature engineering, encoding and scaling are on the **Feature Engineering** page."
     )
 
     tabs = st.tabs(
@@ -95,7 +95,12 @@ def render() -> None:
         c1.metric("Rows before dropping NaN targets", f"{res['rows_before_dropna']:,}")
         c2.metric("Rows after dropping NaN targets", f"{res['rows_after_dropna']:,}")
 
-        st.subheader("Train / test split (80/20, stratified on both targets)")
+        st.subheader("Temporal split (train ≤ 2015-11-09, test after)")
+        st.markdown(
+            f"Training runs on `{res['train_date_min']}` → `{res['train_date_max']}`, testing on "
+            f"`{res['test_date_min']}` → `{res['test_date_max']}`. A random split would put consecutive, "
+            "nearly-identical days on both sides and inflate the scores."
+        )
         c1, c2 = st.columns(2)
         c1.metric("X_train", f"{res['dim_train'][0]:,} rows × {res['dim_train'][1]} cols")
         c2.metric("X_test", f"{res['dim_test'][0]:,} rows × {res['dim_test'][1]} cols")
@@ -110,7 +115,7 @@ def render() -> None:
             for b in bars:
                 ax.annotate(f"{b.get_height():.2f}%", xy=(b.get_x() + b.get_width() / 2, b.get_height()),
                             xytext=(0, 3), textcoords="offset points", ha="center", va="bottom", fontsize=10)
-        ax.set_title("Class distribution after stratification (train vs test)")
+        ax.set_title("Class distribution after temporal split (train vs test)")
         ax.set_xlabel("Class (RainTomorrow)")
         ax.set_ylabel("Proportion (%)")
         ax.set_xticks(x)
@@ -163,15 +168,16 @@ def render() -> None:
         st.pyplot(fig)
         plt.close(fig)
 
-        st.subheader("Imputation (stats fitted on X_train only, applied to both)")
+        st.subheader("Imputation (9h/15h cross-fill + per-station stats)")
         st.dataframe(res["impute_table"], width="stretch", hide_index=True)
         st.caption(
-            f"Remaining missing values after imputation — X_train: {res['train_na_after']}, "
-            f"X_test: {res['test_na_after']} (both must be 0)."
+            f"9h/15h cross-fill recovered {res['cross_fill_filled']:,} values. Remaining missing values after "
+            f"per-station imputation — X_train: {res['train_na_after']}, X_test: {res['test_na_after']} (both must be 0)."
         )
         st.info(
-            "The notebook also contains a commented-out *per-location* imputation: it was found to perform "
-            "slightly worse than global imputation, so it was left disabled."
+            "A missing 9am/3pm reading is first deduced from the other same-day reading (correlation 0.86–0.96), "
+            "then each remaining gap is filled with its station's statistic (median/mean/mode, fitted on the "
+            "training set only), falling back to the global statistic when the station has none."
         )
 
     # ------------------------------------------------------------------ tab 5
@@ -179,8 +185,7 @@ def render() -> None:
         st.subheader("Cleaned data (post-imputation, 0 missing values)")
         st.markdown(
             "This is the output of the Data Preprocessing stage — a complete, NaN-free training set in "
-            "physical units. It is the **exact input** handed to the Feature Engineering stage (and, via the "
-            "same pipeline, to the trained models)."
+            "physical units (before the trig / target encoding applied on the Feature Engineering page)."
         )
         c1, c2 = st.columns(2)
         c1.metric("X_train (cleaned)", f"{res['cleaned_shape'][0]:,} rows × {res['cleaned_shape'][1]} cols")

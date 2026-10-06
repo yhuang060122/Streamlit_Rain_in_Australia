@@ -1,8 +1,11 @@
-"""Preprocessing pipeline (pure data logic) — shared by the Data Preprocessing
-and Feature Engineering pages.
+"""Preprocessing pipeline（规范版）— 供 Data Preprocessing / Feature Engineering 页展示。
 
-Reproduces the steps of docs/02_preprocessing_avec_2jours_prediction.ipynb up to
-the final scaled feature matrix, and returns every intermediate artifact in a dict.
+复用 src.pipeline 的特征变换，逐阶段记录中间产物。对齐「Pré-traitement」规范：
+  - 时间切分：训练 ≤ 2015-11-09，测试 > 该日。
+  - 删高缺失列：Sunshine / Evaporation / Cloud9am / Cloud3pm。
+  - 缺失值填补：9h/15h 互推 + 按站统计量（站内无值退回全局），统计量只从训练集拟合。
+  - 删高相关列：MaxTemp / Pressure3pm / Temp9am。
+  - 编码：风向 / 季节 / 月份 sin/cos 三角编码；Location 目标编码，J+1 / J+2 各一版。
 """
 
 from __future__ import annotations
@@ -11,35 +14,62 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from scipy.stats import jarque_bera, pearsonr, spearmanr
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import RobustScaler, StandardScaler
 
-from src.pipeline import load_raw
+from src.pipeline import (
+    COLS_DROP_CORR,
+    COLS_DROP_HIGH_MISSING,
+    COLS_MEAN,
+    COLS_MEDIAN,
+    COLS_MODE,
+    CUTOFF_DATE,
+    TARGETS,
+    TIME_PAIRS,
+    _apply_imputers,
+    _cross_fill_pairs,
+    build_targets,
+    fit_transformer,
+    get_season,
+    load_raw,
+    transform,
+)
 
 # Bump this to invalidate cached pipeline results whenever the preprocessing logic changes.
-_PIPELINE_VERSION = "2026-10-04c"
+_PIPELINE_VERSION = "2026-10-06-spec"
 
-COLS_DROP = ["Sunshine", "Evaporation", "Cloud3pm", "Cloud9am"]
+# 兼容 data_processing.py 的旧引用
+COLS_DROP = COLS_DROP_HIGH_MISSING
 
-COLS_MEDIAN = ["Rainfall", "WindGustSpeed", "WindSpeed9am", "WindSpeed3pm", "Humidity9am"]
-COLS_MEAN = ["MinTemp", "MaxTemp", "Temp9am", "Temp3pm", "Humidity3pm", "Pressure9am", "Pressure3pm"]
-COLS_MODE = ["WindGustDir", "WindDir9am", "WindDir3pm", "RainToday"]
+# 三角编码列（[-1,1]，不参与缩放）
+_TRIG_COLS = [
+    "WindGustDir_sin", "WindGustDir_cos",
+    "WindDir9am_sin", "WindDir9am_cos",
+    "WindDir3pm_sin", "WindDir3pm_cos",
+    "Season_sin", "Season_cos",
+    "Month_sin", "Month_cos",
+]
 
-CONTINUOUS_COLS = [
-    "MinTemp", "MaxTemp", "Rainfall", "WindGustSpeed", "WindSpeed9am", "WindSpeed3pm",
-    "Humidity9am", "Humidity3pm", "Pressure9am", "Pressure3pm", "Temp9am", "Temp3pm",
+# 缩放列（删高相关列之后）
+_STANDARD_COLS = ["MinTemp", "Temp3pm", "Humidity3pm", "Pressure9am", "Temp_diff", "Humidity_diff", "Location_encoded"]
+_ROBUST_COLS = ["Rainfall", "WindGustSpeed", "WindSpeed9am", "WindSpeed3pm", "Humidity9am", "Pressure_diff"]
+
+# Jarque-Bera 检验的连续变量（删高相关列之后）
+_CONTINUOUS_COLS = [
+    "MinTemp", "Rainfall", "WindGustSpeed", "WindSpeed9am", "WindSpeed3pm",
+    "Humidity9am", "Humidity3pm", "Pressure9am", "Temp3pm",
     "Temp_diff", "Humidity_diff", "Pressure_diff",
 ]
 
+# Pearson / Spearman 与目标的相关性分析变量
+_PS_VARS = [
+    "MinTemp", "Rainfall", "WindGustSpeed", "WindSpeed9am", "WindSpeed3pm",
+    "Humidity9am", "Humidity3pm", "Pressure9am", "Temp3pm",
+    "Temp_diff", "Humidity_diff", "Pressure_diff",
+    "Month_sin", "Month_cos", "Season_sin", "Season_cos", "Location_encoded",
+]
 
-def get_season(month: int) -> str:
-    if month in (12, 1, 2):
-        return "Summer"
-    if month in (3, 4, 5):
-        return "Autumn"
-    if month in (6, 7, 8):
-        return "Winter"
-    return "Spring"
+_CROSS_FILL_FLAT = {c for pair in TIME_PAIRS for c in pair}
+_TIME_PAIR_FLAT = [c for pair in TIME_PAIRS for c in pair]
 
 
 @st.cache_data(show_spinner="Running the preprocessing pipeline…")
@@ -54,47 +84,51 @@ def run_preprocessing(_cache_version: str = _PIPELINE_VERSION) -> dict:
 
     # ---- Step 2: drop high-missing columns (+ leakage column RISK_MM) ----
     out["shape_before"] = df.shape
-    df = df.drop(columns=COLS_DROP)
+    df = df.drop(columns=[c for c in COLS_DROP_HIGH_MISSING if c in df.columns])
     leakage_col = "RISK_MM" if "RISK_MM" in df.columns else None
     if leakage_col:
         df = df.drop(columns=[leakage_col])
     out["leakage_col"] = leakage_col
     out["shape_after_drop"] = df.shape
 
-    # ---- Step 3: build the two-day target (merge on Location + Date-2) ----
-    df["Date"] = pd.to_datetime(df["Date"])
-    target_2j = df[["Location", "Date", "RainToday"]].copy()
-    target_2j["Date"] = target_2j["Date"] - pd.Timedelta(days=2)
-    target_2j = target_2j.rename(columns={"RainToday": "RainInTwoDays"})
-    df = df.merge(target_2j, on=["Location", "Date"], how="left", validate="one_to_one")
+    # ---- Step 3: build targets (map RainToday/RainTomorrow, J+2 target) ----
+    df = build_targets(df)
     out["rows_before_dropna"] = len(df)
-    df = df.dropna(subset=["RainTomorrow", "RainInTwoDays"])
+    df = df.dropna(subset=["RainTomorrow", "RainInTwoDays"]).reset_index(drop=True)
     out["rows_after_dropna"] = len(df)
 
-    # ---- Step 4: stratified train/test split (80/20 on both targets) ----
-    y = df[["RainTomorrow", "RainInTwoDays"]]
-    X = df.drop(columns=["RainTomorrow", "RainInTwoDays"])
-    strat_key = y.astype(str).agg("_".join, axis=1)
-    X_train, X_test, y_df_train, y_df_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=strat_key
-    )
-    y_train = y_df_train["RainTomorrow"]
-    y_train2 = y_df_train["RainInTwoDays"]
-    y_test = y_df_test["RainTomorrow"]
-    y_test2 = y_df_test["RainInTwoDays"]
-    out["dim_train"] = X_train.shape
-    out["dim_test"] = X_test.shape
-    out["prop_train"] = (y_train.value_counts(normalize=True) * 100).round(2)
-    out["prop_test"] = (y_test.value_counts(normalize=True) * 100).round(2)
+    # ---- Step 4: temporal split (train ≤ cutoff, test > cutoff) ----
+    cutoff = pd.Timestamp(CUTOFF_DATE)
+    train_mask = df["Date"] <= cutoff
+    df_train = df[train_mask].reset_index(drop=True)
+    df_test = df[~train_mask].reset_index(drop=True)
 
-    # ---- Step 5: IQR outlier detection (train only) ----
-    X_train_num = X_train.select_dtypes(include=[np.number])
+    y_train = df_train["RainTomorrow"].reset_index(drop=True)
+    y_train2 = df_train["RainInTwoDays"].reset_index(drop=True)
+    y_test = df_test["RainTomorrow"].reset_index(drop=True)
+    y_test2 = df_test["RainInTwoDays"].reset_index(drop=True)
+
+    out["cutoff"] = CUTOFF_DATE
+    out["dim_train"] = (len(df_train), len(df_train.columns) - 2)
+    out["dim_test"] = (len(df_test), len(df_test.columns) - 2)
+    out["train_date_min"] = str(df_train["Date"].min().date())
+    out["train_date_max"] = str(df_train["Date"].max().date())
+    out["test_date_min"] = str(df_test["Date"].min().date())
+    out["test_date_max"] = str(df_test["Date"].max().date())
+    label_map = {0: "No", 1: "Yes"}
+    out["prop_train"] = (y_train.map(label_map).value_counts(normalize=True) * 100).round(2)
+    out["prop_test"] = (y_test.map(label_map).value_counts(normalize=True) * 100).round(2)
+
+    # ---- Step 5: IQR outlier detection (train only, numeric cols) ----
+    X_train_num = df_train.select_dtypes(include=[np.number]).drop(
+        columns=["RainToday", "RainTomorrow", "RainInTwoDays", "MaxTempTomorrow", "MaxTempInTwoDays"],
+        errors="ignore",
+    )
     out["numeric_cols"] = list(X_train_num.columns)
-    out["X_train_num"] = X_train_num.copy()  # pre-imputation snapshot (for boxplots / distributions)
+    out["X_train_num"] = X_train_num.copy()
     iqr_rows = []
     for col in X_train_num.columns:
-        q1 = X_train_num[col].quantile(0.25)
-        q3 = X_train_num[col].quantile(0.75)
+        q1, q3 = X_train_num[col].quantile(0.25), X_train_num[col].quantile(0.75)
         iqr = q3 - q1
         lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
         mask = (X_train_num[col] < lo) | (X_train_num[col] > hi)
@@ -109,14 +143,12 @@ def run_preprocessing(_cache_version: str = _PIPELINE_VERSION) -> dict:
         pd.DataFrame(iqr_rows).sort_values("Outliers %", ascending=False).reset_index(drop=True)
     )
 
-    # ---- Step 6: skewness (decides median vs mean imputation) ----
+    # ---- Step 6: skewness (informative only; imputation is per-station) ----
     skew_rows = []
     for col in X_train_num.columns:
-        s = X_train_num[col].skew()
         skew_rows.append({
-            "Variable": col, "Skewness": round(s, 3),
-            "Imputation rule": "median" if abs(s) >= 0.5 else "mean",
-            "Missing": int(X_train[col].isna().sum()),
+            "Variable": col, "Skewness": round(X_train_num[col].skew(), 3),
+            "Missing": int(X_train_num[col].isna().sum()),
         })
     out["skew_table"] = (
         pd.DataFrame(skew_rows)
@@ -124,103 +156,64 @@ def run_preprocessing(_cache_version: str = _PIPELINE_VERSION) -> dict:
         .reset_index(drop=True)
     )
 
-    # ---- Step 7: imputation (stats computed on X_train only, applied to both) ----
-    impute_values: dict = {}
+    # ---- Step 7: imputation stats (9h/15h cross-fill count + per-station imputers) ----
+    before_na = int(df_train[_TIME_PAIR_FLAT].isna().sum().sum())
+    after_cross_na = int(_cross_fill_pairs(df_train[_TIME_PAIR_FLAT]).isna().sum().sum())
+    out["cross_fill_filled"] = before_na - after_cross_na
+
+    transformer = fit_transformer(df_train)
+
+    impute_rows = []
     for col in COLS_MEDIAN:
-        impute_values[col] = X_train[col].median()
+        impute_rows.append({"Variable": col, "Statistic": "median", "9h/15h cross-fill": "✓" if col in _CROSS_FILL_FLAT else "", "Per-station": "✓"})
     for col in COLS_MEAN:
-        impute_values[col] = X_train[col].mean()
+        impute_rows.append({"Variable": col, "Statistic": "mean", "9h/15h cross-fill": "✓" if col in _CROSS_FILL_FLAT else "", "Per-station": "✓"})
     for col in COLS_MODE:
-        impute_values[col] = X_train[col].mode()[0]
-    for col, val in impute_values.items():
-        X_train[col] = X_train[col].fillna(val)
-        X_test[col] = X_test[col].fillna(val)
+        impute_rows.append({"Variable": col, "Statistic": "mode", "9h/15h cross-fill": "✓" if col in _CROSS_FILL_FLAT else "", "Per-station": "✓"})
+    out["impute_table"] = pd.DataFrame(impute_rows)
 
-    method_map = {c: "median" for c in COLS_MEDIAN}
-    method_map.update({c: "mean" for c in COLS_MEAN})
-    method_map.update({c: "mode" for c in COLS_MODE})
-    impute_table = pd.DataFrame([
-        {
-            "Variable": col,
-            "Method": method_map[col],
-            "Imputed value": f"{val:.2f}" if isinstance(val, (int, float, np.floating)) else str(val),
-        }
-        for col, val in impute_values.items()
-    ])
-    out["impute_table"] = impute_table
-    out["train_na_after"] = int(X_train.isna().sum().sum())
-    out["test_na_after"] = int(X_test.isna().sum().sum())
+    # ---- Step 8: final feature matrices via shared transform (J1 / J2) ----
+    X_train_enc1 = transform(df_train, transformer, "J1")
+    X_test_enc1 = transform(df_test, transformer, "J1")
+    X_train_enc2 = transform(df_train, transformer, "J2")
+    X_test_enc2 = transform(df_test, transformer, "J2")
 
-    # snapshot of the cleaned data (post-imputation, 0 NaN) — the output of this stage,
-    # which is exactly the input handed to Feature Engineering
-    out["cleaned_head"] = X_train.head(12).copy()
-    out["cleaned_shape"] = X_train.shape
-    out["cleaned_cols"] = list(X_train.columns)
+    out["train_na_after"] = int(X_train_enc1.isna().sum().sum())
+    out["test_na_after"] = int(X_test_enc1.isna().sum().sum())
 
-    # ---- Step 8: feature engineering (row-wise, no fitted stats) ----
-    def engineer_vars(Z):
-        Z = Z.copy()
-        Z["Date"] = pd.to_datetime(Z["Date"])
-        Z["Month"] = Z["Date"].dt.month
-        Z["Season"] = Z["Month"].apply(get_season)
-        Z["Temp_diff"] = Z["Temp3pm"] - Z["Temp9am"]
-        Z["Humidity_diff"] = Z["Humidity3pm"] - Z["Humidity9am"]
-        Z["Pressure_diff"] = Z["Pressure3pm"] - Z["Pressure9am"]
-        return Z
+    # 填补后、编码前的数据（供 Data Preprocessing 页「Cleaned Data」展示）
+    X_imp = _apply_imputers(_cross_fill_pairs(df_train), transformer["imputers"])
+    target_cols = [c for c in TARGETS if c in X_imp.columns]
+    out["cleaned_head"] = X_imp.drop(columns=target_cols).head(12).copy()
+    out["cleaned_shape"] = (len(X_imp), len(X_imp.columns) - len(target_cols))
+    out["cleaned_cols"] = [c for c in X_imp.columns if c not in target_cols]
 
-    X_train = engineer_vars(X_train)
-    X_test = engineer_vars(X_test)
-
-    y_train_bin = (y_train == "Yes").astype(int)
-    feat_cols = ["Temp_diff", "Humidity_diff", "Pressure_diff", "Month"]
-    out["feature_corr"] = (
-        X_train[feat_cols].corrwith(y_train_bin).sort_values(key=lambda s: s.abs(), ascending=False).round(4)
-    )
-
-    # snapshot of the feature-engineered data (new variables added, before encoding/scaling)
-    out["fe_head"] = X_train.head(12).copy()
-    out["fe_shape"] = X_train.shape
-    out["fe_new_cols"] = ["Month", "Season", "Temp_diff", "Humidity_diff", "Pressure_diff"]
-
-    # ---- Step 9: encoding ----
-    y_train_enc = (y_train == "Yes").astype(int)
-    y_test_enc = (y_test == "Yes").astype(int)
-    y_train2_enc = (y_train2 == "Yes").astype(int)
-    y_test2_enc = (y_test2 == "Yes").astype(int)
-
-    X_train["RainToday"] = X_train["RainToday"].map({"No": 0, "Yes": 1})
-    X_test["RainToday"] = X_test["RainToday"].map({"No": 0, "Yes": 1})
-
-    loc_rate = y_train_enc.groupby(X_train["Location"]).mean()
-    global_rate = float(y_train_enc.mean())
-    X_train["Location_encoded"] = X_train["Location"].map(loc_rate)
-    X_test["Location_encoded"] = X_test["Location"].map(loc_rate)
-    unseen = int(X_test["Location_encoded"].isna().sum())
-    X_test["Location_encoded"] = X_test["Location_encoded"].fillna(global_rate)
-
-    X_train = X_train.drop(columns=["Location", "Date"])
-    X_test = X_test.drop(columns=["Location", "Date"])
-
-    cols_onehot = ["WindGustDir", "WindDir9am", "WindDir3pm", "Season"]
-    X_train = pd.get_dummies(X_train, columns=cols_onehot, drop_first=True, dtype=int)
-    X_test = pd.get_dummies(X_test, columns=cols_onehot, drop_first=True, dtype=int)
-    X_test = X_test.reindex(columns=X_train.columns, fill_value=0)
-
+    loc_rate = pd.Series(transformer["loc_rate"])
+    loc_rate2 = pd.Series(transformer["loc_rate2"])
     out["loc_rate_pct"] = (loc_rate * 100).sort_values(ascending=False).round(2)
-    out["unseen_locations"] = unseen
-    out["global_rate"] = round(global_rate, 4)
-    out["enc_dim"] = X_train.shape
+    out["loc_rate_pct2"] = (loc_rate2 * 100).sort_values(ascending=False).round(2)
+    out["global_rate"] = round(transformer["global_rate"], 4)
+    out["global_rate2"] = round(transformer["global_rate2"], 4)
+    out["unseen_locations"] = int((~df_test["Location"].isin(transformer["loc_rate"].keys())).sum())
+    out["enc_dim"] = X_train_enc1.shape
+    out["trig_cols"] = _TRIG_COLS
+    out["corr_dropped"] = COLS_DROP_CORR
 
-    # ---- Step 10: Pearson vs Spearman (on encoded, pre-scaling X_train) ----
-    ps_vars = [
-        "MinTemp", "MaxTemp", "Rainfall", "WindGustSpeed", "WindSpeed9am", "WindSpeed3pm",
-        "Humidity9am", "Humidity3pm", "Pressure9am", "Pressure3pm", "Temp9am", "Temp3pm",
-        "Temp_diff", "Humidity_diff", "Pressure_diff", "Month", "Location_encoded",
-    ]
+    # ---- Step 9: feature engineering correlation (new variables vs target) ----
+    feat_cols = ["Temp_diff", "Humidity_diff", "Pressure_diff", "Month_sin", "Month_cos"]
+    out["feature_corr"] = (
+        X_train_enc1[feat_cols].corrwith(y_train.astype(float))
+        .sort_values(key=lambda s: s.abs(), ascending=False).round(4)
+    )
+    out["fe_head"] = X_train_enc1.head(12).copy()
+    out["fe_shape"] = X_train_enc1.shape
+    out["fe_new_cols"] = ["Temp_diff", "Humidity_diff", "Pressure_diff"] + _TRIG_COLS + ["Location_encoded"]
+
+    # ---- Step 10: Pearson vs Spearman ----
     ps_rows = []
-    for col in ps_vars:
-        p = pearsonr(X_train[col], y_train_enc)[0]
-        s = spearmanr(X_train[col], y_train_enc)[0]
+    for col in _PS_VARS:
+        p = pearsonr(X_train_enc1[col], y_train.astype(float))[0]
+        s = spearmanr(X_train_enc1[col], y_train.astype(float))[0]
         ps_rows.append({
             "Variable": col, "Pearson": round(p, 4), "Spearman": round(s, 4),
             "Gap (S−P)": round(s - p, 4),
@@ -232,42 +225,42 @@ def run_preprocessing(_cache_version: str = _PIPELINE_VERSION) -> dict:
         .reset_index(drop=True)
     )
 
-    # ---- Step 11: Jarque-Bera normality test (pre-scaling) ----
+    # ---- Step 11: Jarque-Bera normality test ----
     jb_rows = []
-    for col in CONTINUOUS_COLS:
-        jb_stat, jb_p = jarque_bera(X_train[col])
+    for col in _CONTINUOUS_COLS:
+        jb_stat, jb_p = jarque_bera(X_train_enc1[col])
         jb_rows.append({
             "Variable": col, "JB statistic": round(jb_stat, 1),
-            "Skewness": round(X_train[col].skew(), 3),
+            "Skewness": round(X_train_enc1[col].skew(), 3),
             "p-value (not decisive)": f"{jb_p:.2e}",
         })
     out["jb_table"] = pd.DataFrame(jb_rows).sort_values("JB statistic", ascending=True).reset_index(drop=True)
 
     # ---- Step 12: scaling (fitted on X_train only) ----
-    standard_cols = [
-        "MinTemp", "MaxTemp", "Temp9am", "Temp3pm", "Humidity3pm",
-        "Pressure9am", "Pressure3pm", "Temp_diff", "Humidity_diff", "Location_encoded",
-    ]
-    robust_cols = [
-        "Rainfall", "WindGustSpeed", "WindSpeed9am", "WindSpeed3pm", "Humidity9am", "Pressure_diff",
-    ]
-    scaler_std = StandardScaler()
-    X_train[standard_cols] = scaler_std.fit_transform(X_train[standard_cols])
-    X_test[standard_cols] = scaler_std.transform(X_test[standard_cols])
-    scaler_rob = RobustScaler()
-    X_train[robust_cols] = scaler_rob.fit_transform(X_train[robust_cols])
-    X_test[robust_cols] = scaler_rob.transform(X_test[robust_cols])
+    def _scale(Xtr, Xte):
+        scaler_std = StandardScaler()
+        Xtr[_STANDARD_COLS] = scaler_std.fit_transform(Xtr[_STANDARD_COLS])
+        Xte[_STANDARD_COLS] = scaler_std.transform(Xte[_STANDARD_COLS])
+        scaler_rob = RobustScaler()
+        Xtr[_ROBUST_COLS] = scaler_rob.fit_transform(Xtr[_ROBUST_COLS])
+        Xte[_ROBUST_COLS] = scaler_rob.transform(Xte[_ROBUST_COLS])
+        return Xtr, Xte
 
-    out["std_mean"] = X_train[standard_cols].mean().round(6)
-    out["rob_median"] = X_train[robust_cols].median().round(6)
-    out["final_dim"] = X_train.shape
+    X_train_enc1, X_test_enc1 = _scale(X_train_enc1, X_test_enc1)
+    X_train_enc2, X_test_enc2 = _scale(X_train_enc2, X_test_enc2)
 
-    # ---- final model-ready matrices (input to the Modelling page) ----
-    out["X_train_final"] = X_train
-    out["X_test_final"] = X_test
-    out["y_train"] = y_train_enc
-    out["y_test"] = y_test_enc
-    out["y_train2"] = y_train2_enc
-    out["y_test2"] = y_test2_enc
+    out["std_mean"] = X_train_enc1[_STANDARD_COLS].mean().round(6)
+    out["rob_median"] = X_train_enc1[_ROBUST_COLS].median().round(6)
+    out["final_dim"] = X_train_enc1.shape
+
+    # ---- final model-ready matrices ----
+    out["X_train_final"] = X_train_enc1
+    out["X_test_final"] = X_test_enc1
+    out["X_train_final2"] = X_train_enc2
+    out["X_test_final2"] = X_test_enc2
+    out["y_train"] = y_train.astype(int)
+    out["y_test"] = y_test.astype(int)
+    out["y_train2"] = y_train2.astype(int)
+    out["y_test2"] = y_test2.astype(int)
 
     return out

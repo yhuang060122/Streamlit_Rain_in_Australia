@@ -22,7 +22,7 @@ from src.gating import mark_done, require
 from src.preprocessing import run_preprocessing
 
 # Bump to invalidate cached SHAP results whenever the explanation logic changes.
-_INTERPRETATION_VERSION = "2026-10-04"
+_INTERPRETATION_VERSION = "2026-10-06-spec"
 
 
 @st.cache_resource(show_spinner="Training model & building SHAP explainer…")

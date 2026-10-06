@@ -35,7 +35,7 @@ from src.gating import mark_done, require
 from src.preprocessing import run_preprocessing
 
 # Bump to invalidate cached modelling results whenever the modelling logic changes.
-_MODELING_VERSION = "2026-10-04b"
+_MODELING_VERSION = "2026-10-06-spec"
 
 MODEL_NAMES = ["LogisticRegression", "RandomForest", "XGBoost"]
 
@@ -75,6 +75,7 @@ def _compare_table(modeles: dict, predictions: dict, y_true: pd.Series) -> pd.Da
 def run_modeling(_cache_version: str = _MODELING_VERSION) -> dict:
     res = run_preprocessing(_cache_version)
     X_train, X_test = res["X_train_final"], res["X_test_final"]
+    X_train2, X_test2 = res["X_train_final2"], res["X_test_final2"]
     y_train, y_test = res["y_train"], res["y_test"]
     y_train2, y_test2 = res["y_train2"], res["y_test2"]
 
@@ -84,6 +85,7 @@ def run_modeling(_cache_version: str = _MODELING_VERSION) -> dict:
     if len(X_train) > n_subsample:
         idx = np.random.default_rng(42).choice(len(X_train), n_subsample, replace=False)
         X_train = X_train.iloc[idx].reset_index(drop=True)
+        X_train2 = X_train2.iloc[idx].reset_index(drop=True)
         y_train = y_train.iloc[idx].reset_index(drop=True)
         y_train2 = y_train2.iloc[idx].reset_index(drop=True)
     subsampled = len(X_train) < res["X_train_final"].shape[0]
@@ -141,12 +143,12 @@ def run_modeling(_cache_version: str = _MODELING_VERSION) -> dict:
         ignore_index=True,
     )
 
-    # ---- 2-day prediction: three weighted models ----
+    # ---- 2-day prediction: three weighted models (J+2 uses its own Location encoding) ----
     modeles2 = _weighted_models(spw2)
     pred2 = {}
     for name, m in modeles2.items():
-        m.fit(X_train, y_train2)
-        pred2[name] = (m.predict(X_test), m.predict_proba(X_test)[:, 1])
+        m.fit(X_train2, y_train2)
+        pred2[name] = (m.predict(X_test2), m.predict_proba(X_test2)[:, 1])
     compare2 = _compare_table(modeles2, pred2, y_test2)
     cm2 = {name: confusion_matrix(y_test2, pred2[name][0]) for name in modeles2}
     roc2 = {

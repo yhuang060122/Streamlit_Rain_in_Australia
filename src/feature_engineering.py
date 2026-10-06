@@ -47,8 +47,8 @@ def render() -> None:
     with tabs[0]:
         st.subheader("Feature engineering (row-wise, no fitted statistics)")
         st.markdown(
-            "New variables: `Month`, `Season` (Southern-hemisphere), and intra-day differences "
-            "`Temp_diff`, `Humidity_diff`, `Pressure_diff` (3pm − 9am)."
+            "New variables: intra-day differences `Temp_diff`, `Humidity_diff`, `Pressure_diff` (3pm − 9am), "
+            "plus `Month` and `Season` (Southern-hemisphere) for the cyclical encoding."
         )
         fig, ax = plt.subplots(figsize=(9, 6))
         corr = res["feature_corr"]
@@ -68,19 +68,20 @@ def render() -> None:
         st.pyplot(fig)
         plt.close(fig)
         st.caption(
-            "`Month` shows near-zero linear correlation — seasonality is non-monotonic, so its signal is "
-            "carried by `Season` and only usable by non-linear models."
+            "`Month_sin` / `Month_cos` show near-zero linear correlation individually — seasonality is "
+            "non-monotonic, so its signal is carried by the pair (cyclical encoding) and only usable by "
+            "non-linear models."
         )
 
     # ------------------------------------------------------------------ tab 2
     with tabs[1]:
-        st.subheader("Engineered data (after feature engineering)")
+        st.subheader("Encoded data (after encoding, before scaling)")
         st.markdown(
-            "This is the dataset right after the new variables are added — before categorical encoding and "
-            "scaling. It still keeps `Location`, `Date` and the raw physical columns."
+            "This is the dataset after trig + target encoding and column selection — before scaling. "
+            "It is the 24-feature matrix handed to the models."
         )
         c1, c2 = st.columns(2)
-        c1.metric("X_train (feature-engineered)", f"{res['fe_shape'][0]:,} rows × {res['fe_shape'][1]} cols")
+        c1.metric("X_train (encoded)", f"{res['fe_shape'][0]:,} rows × {res['fe_shape'][1]} cols")
         c2.metric("New variables added", len(res["fe_new_cols"]))
         st.caption(f"New variables: `{', '.join(res['fe_new_cols'])}`")
         st.dataframe(res["fe_head"], width="stretch")
@@ -90,9 +91,11 @@ def render() -> None:
         st.subheader("Encoding")
         st.markdown(
             "- `RainToday` → 0/1\n"
-            "- `Location` → target encoding (rain rate per station, fitted on train only)\n"
-            "- `Date` → dropped (captured by `Month`/`Season`)\n"
-            "- Wind direction + `Season` → one-hot (N−1)"
+            "- Wind directions (16) → sin/cos (trigonometric, cyclical)\n"
+            "- `Month` (1–12) → sin/cos (cyclical)\n"
+            "- `Season` (4) → sin/cos (cyclical)\n"
+            "- `Location` → target encoding (rain rate per station, fitted on train only, one version per horizon)\n"
+            "- `Date` → dropped (captured by `Month`/`Season`)"
         )
         if res["unseen_locations"] > 0:
             st.warning(f"{res['unseen_locations']} test rows had an unseen Location — filled with the global rate ({res['global_rate']}).")
@@ -100,14 +103,18 @@ def render() -> None:
             st.caption("No unseen locations in the test set (all stations seen in training).")
         st.metric("Encoded feature matrix (X_train)", f"{res['enc_dim'][0]:,} rows × {res['enc_dim'][1]} cols")
 
-        st.subheader("Location target encoding (rain-tomorrow rate per station)")
+        st.subheader("Location target encoding (rain rate per station)")
+        st.markdown(
+            "Two versions are built — one per horizon: **J+1** (RainTomorrow rate) and **J+2** "
+            "(RainInTwoDays rate). The plot below shows the J+1 version."
+        )
         loc = res["loc_rate_pct"]
         cmap = sns.color_palette("crest", as_cmap=True)
         norm = plt.Normalize(loc.min(), loc.max())
         data = loc.iloc[::-1]
         fig, ax = plt.subplots(figsize=(10, 14))
         ax.barh(data.index, data.values, color=cmap(norm(data.values)))
-        ax.set_title("Rain-tomorrow rate by station (target encoding, train set)")
+        ax.set_title("Rain-tomorrow rate by station (J+1 target encoding, train set)")
         ax.set_xlabel("Rain-tomorrow rate (%)")
         ax.set_ylabel("Station")
         sns.despine()

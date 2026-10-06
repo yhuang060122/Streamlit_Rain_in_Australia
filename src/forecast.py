@@ -1,6 +1,6 @@
 """Shared forecasting logic — model/data loading and prediction helpers.
 
-Used by the main app (manual forecast) and the Data Understanding page (historical replay).
+预测时复用 src.pipeline 的 transform，保证与训练时的特征口径一致。
 """
 
 from __future__ import annotations
@@ -11,10 +11,17 @@ import joblib
 import pandas as pd
 import streamlit as st
 
-from src.pipeline import CLASS_TARGETS, MODEL_DIR, cast_categories, engineer, load_raw
+from src.pipeline import (
+    CLASS_TARGETS,
+    MODEL_DIR,
+    build_targets,
+    load_raw,
+    transform,
+    transformer_from_meta,
+)
 
 # Bump to invalidate cached forecast data when the pipeline / models change.
-_FORECAST_VERSION = "2026-10-04"
+_FORECAST_VERSION = "2026-10-06-spec"
 
 
 @st.cache_data(show_spinner=False)
@@ -29,13 +36,9 @@ def load_models(_cache_version: str = _FORECAST_VERSION) -> dict:
 
 
 @st.cache_data(show_spinner="Preparing data…")
-def get_engineered(_cache_version: str = _FORECAST_VERSION) -> tuple[pd.DataFrame, dict]:
-    meta = load_meta(_cache_version)
-    raw = load_raw()
-    df = engineer(raw)
-    cat_dtypes = {k: pd.CategoricalDtype(categories=v) for k, v in meta["cat_dtypes"].items()}
-    df = cast_categories(df, cat_dtypes)
-    return df, meta
+def get_engineered(_cache_version: str = _FORECAST_VERSION) -> pd.DataFrame:
+    """返回 build_targets 后的数据（原始观测 + 4 个目标），供 historical replay 展示与取行。"""
+    return build_targets(load_raw())
 
 
 def rain_bar(prob: float, label: str) -> None:
@@ -58,14 +61,19 @@ def rain_bar(prob: float, label: str) -> None:
     )
 
 
-def predict_row(models: dict, meta: dict, X_row: pd.DataFrame) -> dict:
-    X = X_row[meta["features"]].copy()
-    cat_dtypes = {k: pd.CategoricalDtype(categories=v) for k, v in meta["cat_dtypes"].items()}
-    for col, dtype in cat_dtypes.items():
-        if col in X.columns and not isinstance(X[col].dtype, pd.CategoricalDtype):
-            X[col] = X[col].astype(dtype)
+def predict_row(models: dict, meta: dict, X_raw: pd.DataFrame) -> dict:
+    """对原始观测行（含 Date / Location / 原始列 / RainToday 0/1）做变换并预测。
+
+    J+1 目标（RainTomorrow / MaxTempTomorrow）用 J+1 特征，J+2 目标用 J+2 特征。
+    """
+    transformer = transformer_from_meta(meta)
+    X1 = transform(X_raw, transformer, "J1")
+    X2 = transform(X_raw, transformer, "J2")
+
     out = {}
     for t in meta["targets"]:
+        horizon = meta["horizon"][t]
+        X = X1 if horizon == "J1" else X2
         if t in CLASS_TARGETS:
             out[t] = float(models[t].predict_proba(X)[0, 1])
         else:
