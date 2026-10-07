@@ -1,14 +1,14 @@
-"""数据加载 + 特征工程 + 训练管道（规范版）。
+"""Data loading + feature engineering + training pipeline (spec-aligned).
 
-对齐「Pré-traitement」规范：
-  - 时间切分：训练 ≤ 2015-11-09，测试 > 该日（不再随机切分）。
-  - 删高缺失列：Sunshine / Evaporation / Cloud9am / Cloud3pm（>20% 缺失）。
-  - 缺失值填补：9h/15h 互相推断，再按站填补（站内无统计量退回全局）。
-  - 删高相关列：MaxTemp / Pressure3pm / Temp9am（三对 Pearson > 0.8）。
-  - 编码：风向 / 季节 / 月份用 sin/cos 三角编码；Location 用目标编码，J+1、J+2 各一版。
-  - 双 horizon：J+1（RainTomorrow / MaxTempTomorrow）与 J+2（RainInTwoDays / MaxTempInTwoDays）分开训练。
+Aligns with the « Pré-traitement » spec:
+  - Temporal split: train ≤ 2015-11-09, test after (no random split).
+  - Drop high-missingness columns: Sunshine / Evaporation / Cloud9am / Cloud3pm (>20% missing).
+  - Imputation: 9h/15h cross-deduction, then per-station (fall back to global when a station has none).
+  - Drop correlated columns: MaxTemp / Pressure3pm / Temp9am (pairs with |Pearson| > 0.8).
+  - Encoding: wind / season / month → sin/cos; Location → target encoding, one version per horizon.
+  - Dual horizon: J+1 (RainTomorrow / MaxTempTomorrow) and J+2 (RainInTwoDays / MaxTempInTwoDays) trained separately.
 
-特征变换逻辑在此处定义，训练（train_and_save）与预测（forecast）共用，保证口径一致。
+The feature transform lives here and is shared by training (train_and_save) and inference (forecast).
 """
 
 from __future__ import annotations
@@ -37,17 +37,17 @@ DATA_PATH = BASE_DIR / "data" / "weatherAUS.csv"
 MODEL_DIR = BASE_DIR / "models"
 
 # --------------------------------------------------------------------------- #
-# 规范常量
+# Spec constants
 # --------------------------------------------------------------------------- #
-CUTOFF_DATE = "2015-11-09"  # 时间切分点：训练 ≤ 该日，测试 > 该日
+CUTOFF_DATE = "2015-11-09"  # temporal split: train ≤ this date, test after
 
-# 高缺失列（>20% 缺失），直接删除
+# High-missingness columns (>20% missing), dropped outright
 COLS_DROP_HIGH_MISSING = ["Sunshine", "Evaporation", "Cloud3pm", "Cloud9am"]
 
-# 高相关列（三对 Pearson > 0.8 各删其一）
+# Correlated columns (drop one from each pair with |Pearson| > 0.8)
 COLS_DROP_CORR = ["MaxTemp", "Pressure3pm", "Temp9am"]
 
-# 9h / 15h 成对变量：一个缺失时用同一天另一个推断
+# 9h / 15h paired variables: when one is missing, deduce it from the other
 TIME_PAIRS = [
     ("Temp9am", "Temp3pm"),
     ("Humidity9am", "Humidity3pm"),
@@ -72,14 +72,14 @@ TARGET_HORIZON = {
     "MaxTempInTwoDays": "J2",
 }
 
-# 按站填补：偏态 → median，近正态 → mean，类别 → mode
+# Per-station imputation: skewed → median, near-normal → mean, categorical → mode
 COLS_MEDIAN = ["Rainfall", "WindGustSpeed", "WindSpeed9am", "WindSpeed3pm", "Humidity9am"]
 COLS_MEAN = ["MinTemp", "MaxTemp", "Temp9am", "Temp3pm", "Humidity3pm", "Pressure9am", "Pressure3pm"]
 COLS_MODE = ["WindGustDir", "WindDir9am", "WindDir3pm", "RainToday"]
 
 RANDOM_STATE = 42
 
-# 最终特征列顺序（J+1 / J+2 共用同一套列名，仅 Location_encoded 的取值不同）
+# Final feature order (J+1 / J+2 share the same names; only Location_encoded differs)
 FEATURES = [
     "MinTemp", "Rainfall", "WindGustSpeed", "WindSpeed9am", "WindSpeed3pm",
     "Humidity9am", "Humidity3pm", "Pressure9am", "Temp3pm",
@@ -105,15 +105,15 @@ def get_season(month: int) -> str:
 
 @st.cache_data(show_spinner=False)
 def load_raw(path=DATA_PATH) -> pd.DataFrame:
-    """加载 weatherAUS.csv，整站共享同一份缓存。"""
+    """Load weatherAUS.csv, shared across the whole app via cache."""
     return pd.read_csv(path, na_values=["NA"])
 
 
 # --------------------------------------------------------------------------- #
-# 特征变换
+# Feature transform
 # --------------------------------------------------------------------------- #
 def build_targets(df: pd.DataFrame) -> pd.DataFrame:
-    """映射 RainToday/RainTomorrow 为 0/1，并构建 J+2 降雨、J+1/J+2 最高温目标。"""
+    """Map RainToday/RainTomorrow to 0/1 and build the J+2 rain and J+1/J+2 max-temp targets."""
     df = df.copy()
     df["RainToday"] = df["RainToday"].map({"No": 0, "Yes": 1})
     df["RainTomorrow"] = df["RainTomorrow"].map({"No": 0, "Yes": 1})
@@ -123,7 +123,7 @@ def build_targets(df: pd.DataFrame) -> pd.DataFrame:
     g = df.groupby("Location")
     gap1 = (g["Date"].shift(-1) - df["Date"]).dt.days
     gap2 = (g["Date"].shift(-2) - df["Date"]).dt.days
-    # 只在日期连续（间隔恰好 1 / 2 天）时才算有效目标，避免跨站点断档
+    # Only treat consecutive dates (gap of exactly 1 / 2 days) as valid targets, avoiding cross-station gaps
     df["RainInTwoDays"] = np.where(gap2 == 2, g["RainToday"].shift(-2), np.nan)
     df["MaxTempTomorrow"] = np.where(gap1 == 1, g["MaxTemp"].shift(-1), np.nan)
     df["MaxTempInTwoDays"] = np.where(gap2 == 2, g["MaxTemp"].shift(-2), np.nan)
@@ -131,7 +131,7 @@ def build_targets(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def verify_j2_target(df: pd.DataFrame) -> float:
-    """自检：用 +1 天偏移重建 RainTomorrow，应 100% 命中（验证 J+2 join 的 +2 偏移正确）。"""
+    """Self-check: rebuild RainTomorrow via a +1-day shift — should hit 100% (validates the +2 offset)."""
     g = df.groupby("Location")
     gap1 = (g["Date"].shift(-1) - df["Date"]).dt.days
     rebuilt = np.where(gap1 == 1, g["RainToday"].shift(-1), np.nan)
@@ -140,7 +140,7 @@ def verify_j2_target(df: pd.DataFrame) -> float:
 
 
 def _cross_fill_pairs(df: pd.DataFrame) -> pd.DataFrame:
-    """9h 缺失 → 用同一天 15h 推断；反之亦然。缺失的列直接跳过。"""
+    """Missing 9h → deduce from the same day's 15h, and vice versa. Columns absent are skipped."""
     df = df.copy()
     for c9, c3 in TIME_PAIRS:
         if c9 not in df.columns or c3 not in df.columns:
@@ -153,7 +153,7 @@ def _cross_fill_pairs(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _fit_imputers(df_train: pd.DataFrame) -> dict:
-    """在训练集上拟合按站统计量（median/mean/mode），站内全缺失退回全局。"""
+    """Fit per-station statistics (median/mean/mode) on the training set; a station with no data falls back to the global value."""
     imputers = {}
     for col in COLS_MEDIAN:
         station = df_train.groupby("Location")[col].median()
@@ -199,7 +199,7 @@ def _encode_month(series: pd.Series):
 
 
 def fit_transformer(df_train: pd.DataFrame) -> dict:
-    """在时间切分后的训练集上拟合所有统计量，返回 transformer。"""
+    """Fit all statistics on the temporally-split training set and return the transformer."""
     y_train = df_train["RainTomorrow"]
     y_train2 = df_train["RainInTwoDays"]
     return {
@@ -212,29 +212,29 @@ def fit_transformer(df_train: pd.DataFrame) -> dict:
 
 
 def transform(df: pd.DataFrame, transformer: dict, horizon: str = "J1") -> pd.DataFrame:
-    """把原始观测（含 Date / Location / 原始列 / RainToday 0/1）转成模型特征矩阵。
+    """Turn raw observations (Date / Location / raw columns / RainToday 0/1) into the model feature matrix.
 
-    顺序：删高缺失列 → 9h/15h 互推 → 按站填补 → 特征工程(diff) → 删高相关列
-        → 三角编码 → Location 目标编码 → 选列。
+    Order: drop high-missingness → 9h/15h cross-fill → per-station impute → diff features → drop correlated
+        → trig encoding → Location target encoding → select columns.
     """
     df = df.copy()
     df["Date"] = pd.to_datetime(df["Date"])
 
-    # 1) 删高缺失列
+    # 1) Drop high-missingness columns
     df = df.drop(columns=[c for c in COLS_DROP_HIGH_MISSING if c in df.columns])
-    # 2) 9h / 15h 互推
+    # 2) 9h / 15h cross-fill
     df = _cross_fill_pairs(df)
-    # 3) 按站填补（用训练集拟合的统计量）
+    # 3) Per-station imputation (using stats fitted on the training set)
     df = _apply_imputers(df, transformer["imputers"])
-    # 4) 特征工程（diff 需要 Temp9am / Pressure3pm，故在删相关列之前）
+    # 4) Feature engineering (diffs need Temp9am / Pressure3pm, so do this before dropping correlated columns)
     df["Month"] = df["Date"].dt.month
     df["Season"] = df["Month"].map(get_season)
     df["Temp_diff"] = df["Temp3pm"] - df["Temp9am"]
     df["Humidity_diff"] = df["Humidity3pm"] - df["Humidity9am"]
     df["Pressure_diff"] = df["Pressure3pm"] - df["Pressure9am"]
-    # 5) 删高相关列
+    # 5) Drop correlated columns
     df = df.drop(columns=[c for c in COLS_DROP_CORR if c in df.columns])
-    # 6) 三角编码
+    # 6) Trig encoding
     for d in ["WindGustDir", "WindDir9am", "WindDir3pm"]:
         s, c = _encode_wind(df[d])
         df[f"{d}_sin"], df[f"{d}_cos"] = s, c
@@ -242,7 +242,7 @@ def transform(df: pd.DataFrame, transformer: dict, horizon: str = "J1") -> pd.Da
     df["Season_sin"], df["Season_cos"] = s, c
     s, c = _encode_month(df["Month"])
     df["Month_sin"], df["Month_cos"] = s, c
-    # 7) Location 目标编码（按 horizon）
+    # 7) Location target encoding (per horizon)
     loc_rate = transformer["loc_rate"] if horizon == "J1" else transformer["loc_rate2"]
     global_rate = transformer["global_rate"] if horizon == "J1" else transformer["global_rate2"]
     df["Location_encoded"] = df["Location"].map(loc_rate).fillna(global_rate)
@@ -251,10 +251,10 @@ def transform(df: pd.DataFrame, transformer: dict, horizon: str = "J1") -> pd.Da
 
 
 # --------------------------------------------------------------------------- #
-# transformer 序列化（meta.json 与内存 dict 互转）
+# Transformer serialization (meta.json <-> in-memory dict)
 # --------------------------------------------------------------------------- #
 def _to_json(v):
-    """numpy 标量转原生类型，字符串原样保留（mode 列填补值是 str）。"""
+    """Convert numpy scalars to native types; keep strings as-is (mode imputation values are str)."""
     if isinstance(v, np.generic):
         return v.item()
     return v
@@ -292,7 +292,7 @@ def transformer_from_meta(meta: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# 训练
+# Training
 # --------------------------------------------------------------------------- #
 def _classifier(spw: float) -> XGBClassifier:
     return XGBClassifier(
@@ -334,20 +334,20 @@ def train_and_save() -> dict:
 
     df = build_targets(load_raw())
 
-    # 时间切分
+    # Temporal split
     cutoff = pd.Timestamp(CUTOFF_DATE)
     train_mask = df["Date"] <= cutoff
     df_train = df[train_mask].reset_index(drop=True)
     df_test = df[~train_mask].reset_index(drop=True)
 
-    # 自检：J+2 目标构建正确性（+1 偏移应重建 RainTomorrow）
+    # Self-check: J+2 target built correctly (a +1 shift must rebuild RainTomorrow)
     j2_ok = verify_j2_target(df)
     print(f"[check] J+2 offset verification (rebuild RainTomorrow via +1 shift): {j2_ok:.4%}")
 
-    # 拟合 transformer（只用训练集统计量）
+    # Fit the transformer (training-set statistics only)
     transformer = fit_transformer(df_train)
 
-    # 双 horizon 特征矩阵
+    # Dual-horizon feature matrices
     X_train1 = transform(df_train, transformer, "J1")
     X_test1 = transform(df_test, transformer, "J1")
     X_train2 = transform(df_train, transformer, "J2")
@@ -361,7 +361,7 @@ def train_and_save() -> dict:
         X_tr = X_train1 if horizon == "J1" else X_train2
         X_te = X_test1 if horizon == "J1" else X_test2
 
-        # 只保留该目标非 NaN 的行
+        # Keep only rows where this target is non-NaN
         valid_tr = df_train[target].notna().to_numpy()
         valid_te = df_test[target].notna().to_numpy()
         X_tr = X_tr[valid_tr].reset_index(drop=True)
@@ -405,7 +405,7 @@ def train_and_save() -> dict:
         joblib.dump(model, MODEL_DIR / f"{target}.joblib")
         print(f"[saved] {target} ({horizon}): {metrics[target]}")
 
-    # RainTomorrow 主模型的特征重要度
+    # Feature importance of the main (RainTomorrow) model
     importance = {
         FEATURES[i]: float(models["RainTomorrow"].feature_importances_[i])
         for i in range(len(FEATURES))

@@ -1,6 +1,6 @@
 """Shared forecasting logic — model/data loading and prediction helpers.
 
-预测时复用 src.pipeline 的 transform，保证与训练时的特征口径一致。
+Inference reuses src.pipeline.transform so features match training exactly.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def load_models(_cache_version: str = _FORECAST_VERSION) -> dict:
 
 @st.cache_data(show_spinner="Preparing data…")
 def get_engineered(_cache_version: str = _FORECAST_VERSION) -> pd.DataFrame:
-    """返回 build_targets 后的数据（原始观测 + 4 个目标），供 historical replay 展示与取行。"""
+    """Return the build_targets output (raw observations + 4 targets) for historical-replay display and row lookup."""
     return build_targets(load_raw())
 
 
@@ -70,9 +70,9 @@ def rain_bar(prob: float, label: str) -> None:
 
 
 def predict_row(models: dict, meta: dict, X_raw: pd.DataFrame) -> dict:
-    """对原始观测行（含 Date / Location / 原始列 / RainToday 0/1）做变换并预测。
+    """Transform raw observation rows (Date / Location / raw columns / RainToday 0/1) and predict.
 
-    J+1 目标（RainTomorrow / MaxTempTomorrow）用 J+1 特征，J+2 目标用 J+2 特征。
+    J+1 targets (RainTomorrow / MaxTempTomorrow) use the J+1 features, J+2 targets use the J+2 features.
     """
     transformer = transformer_from_meta(meta)
     X1 = transform(X_raw, transformer, "J1")
