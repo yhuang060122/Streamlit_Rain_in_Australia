@@ -42,7 +42,7 @@ def render() -> None:
     df_eng = get_engineered()
     locations = sorted(df_eng["Location"].dropna().unique().tolist())
 
-    tabs = st.tabs(["📅 Historical Replay", "✍️ Manual Input", "🧠 Model & Parameters"])
+    tabs = st.tabs(["📅 Historical Replay", "✍️ Manual Input", "🧠 Model & Parameters", "🛠️ Pipeline"])
 
     # ---------------------------------------------------------------- tab 1
     with tabs[0]:
@@ -333,3 +333,57 @@ def render() -> None:
             st.markdown("### What drives the rain prediction")
             st.markdown("Top-8 gain-based feature importances for the RainTomorrow model:")
             st.dataframe(pd.DataFrame(imp_rows), width="stretch", hide_index=True)
+
+    # ---------------------------------------------------------------- tab 4
+    with tabs[3]:
+        st.subheader("How the full pipeline works")
+        st.caption(
+            "Training and inference share the same feature code path (`src/pipeline.transform()`), so the "
+            "features never drift apart."
+        )
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("### 🔧 Training — `python -m src.pipeline`")
+            st.markdown(
+                "1. **Load** `data/weatherAUS.csv`\n"
+                "2. **Build targets** — `RainToday`/`RainTomorrow` → 0/1, shift for J+1 & J+2 targets\n"
+                "3. **Temporal split** — train ≤ 2015-11-09, test after\n"
+                "4. **Fit transformer** (train only) — per-station imputation stats + Location rain-rates\n"
+                "5. **Transform** — drop → cross-fill → impute → diff → trig + target encoding\n"
+                "6. **Train** 4 XGBoost (J+1/J+2 × classifier/regressor), `scale_pos_weight` for imbalance\n"
+                "7. **Save** `models/*.joblib` + `meta.json` (transformer, features, metrics)"
+            )
+        with c2:
+            st.markdown("### 🎯 Inference — this page")
+            st.markdown(
+                "1. **Load** `models/*.joblib` + the `meta.json` transformer\n"
+                "2. **Transform the input** with the *same* `transform()` → the same 24 features\n"
+                "3. **Predict** — J+1 targets use the J+1 Location encoding, J+2 targets use J+2"
+            )
+
+        st.markdown("---")
+        st.markdown("### 🔑 Why training and inference never drift")
+        st.markdown(
+            "- The transformer (per-station imputation stats + Location rain-rates) is **fitted once on the "
+            "training set and serialised into `meta.json`** — inference reuses it, nothing is recomputed on the fly.\n"
+            "- `transform()` is shared by `train_and_save()` (training) and `predict_row()` (inference).\n"
+            "- Each horizon keeps its **own Location encoding** (J+1 rain rate vs J+2 rain rate)."
+        )
+
+        st.markdown("### 🧱 Preprocessing steps (in order)")
+        steps = pd.DataFrame([
+            {"Step": 1, "Stage": "Drop high-missingness", "Detail": "Sunshine, Evaporation, Cloud9am, Cloud3pm (>20% missing)"},
+            {"Step": 2, "Stage": "9h/15h cross-fill", "Detail": "a missing 9am/3pm reading is deduced from the other same-day reading"},
+            {"Step": 3, "Stage": "Per-station imputation", "Detail": "median / mean / mode per station, global fallback — fitted on train only"},
+            {"Step": 4, "Stage": "Diff features", "Detail": "Temp_diff, Humidity_diff, Pressure_diff (3pm − 9am)"},
+            {"Step": 5, "Stage": "Drop correlated", "Detail": "MaxTemp, Pressure3pm, Temp9am (pairs with |Pearson| > 0.8)"},
+            {"Step": 6, "Stage": "Trig encoding", "Detail": "wind (16) / season (4) / month (12) → sin + cos"},
+            {"Step": 7, "Stage": "Target encoding", "Detail": "Location → rain rate per station, one version per horizon"},
+        ])
+        st.dataframe(steps, width="stretch", hide_index=True)
+
+        st.markdown(
+            f"Final feature matrix: **{len(meta['features'])} features** — the full list is on the "
+            "**Model & Parameters** tab."
+        )
