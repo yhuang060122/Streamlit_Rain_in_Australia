@@ -387,3 +387,21 @@ def render() -> None:
             f"Final feature matrix: **{len(meta['features'])} features** — the full list is on the "
             "**Model & Parameters** tab."
         )
+
+        st.markdown("---")
+        st.markdown("### 💻 Core code")
+        st.caption("The key functions, read live from `src/` (so they always match what's running):")
+
+        import inspect
+
+        from src import forecast as _forecast
+        from src import pipeline as _pipeline
+
+        with st.expander("`transform()` — shared feature encoding (training & inference)", expanded=False):
+            st.code(inspect.getsource(_pipeline.transform), language="python")
+
+        with st.expander("`train_and_save()` — training the 4 XGBoost models and saving them", expanded=False):
+            st.code(inspect.getsource(_pipeline.train_and_save), language="python")
+
+        with st.expander("`predict_row()` — inference reusing the saved transformer", expanded=False):
+            st.code(inspect.getsource(_forecast.predict_row), language="python")
