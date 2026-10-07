@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import io
+import joblib
 import pickle
 import time
 import warnings
@@ -416,6 +418,13 @@ def run_modeling(_cache_version: str = _MODELING_VERSION) -> dict:
 # --------------------------------------------------------------------------- #
 # 渲染辅助
 # --------------------------------------------------------------------------- #
+def _serialize(obj) -> bytes:
+    """把对象 joblib 序列化到内存字节（供 st.download_button 下载）。"""
+    buf = io.BytesIO()
+    joblib.dump(obj, buf)
+    return buf.getvalue()
+
+
 def _cm_figure(cms: dict) -> plt.Figure:
     fig, axes = plt.subplots(1, len(cms), figsize=(4 * len(cms), 4))
     if len(cms) == 1:
@@ -530,3 +539,46 @@ def render() -> None:
     st.header("🌧️ J+2 — RainInTwoDays")
     tabs2 = st.tabs(["1️⃣ Imbalance", "2️⃣ Hyperparameters", "3️⃣ Evaluation", "4️⃣ Reports", "5️⃣ Overfitting & Costs", "6️⃣ Per-station"])
     _render_horizon(tabs2, j2, "J+2", m["scale_pos_weight2"])
+
+    # ------------------------------------------------------------------ 保存模型
+    with st.expander("💾 Save a trained model", expanded=False):
+        st.markdown(
+            "Serialize a trained model — plus its threshold, features, imbalance method and metrics — "
+            "to a `.joblib` file you can download and reuse."
+        )
+        c1, c2, c3 = st.columns(3)
+        save_horizon = c1.selectbox("Target", ["J+1", "J+2"], key="save_horizon")
+        h_save = m["j1"] if save_horizon == "J+1" else m["j2"]
+        best = h_save["best_model"]
+        options = [f"Best model ({best})"] + [n for n in MODEL_NAMES]
+        save_choice = c2.selectbox("Model", options, key="save_model")
+
+        name = best if save_choice.startswith("Best") else save_choice
+        model = h_save["models"][name]
+        threshold = h_save["thresholds"][name]
+        method = h_save["imbalance"].loc[h_save["imbalance"]["Model"] == name, "Selected"].iloc[0]
+        f1 = h_save["metrics"].loc[h_save["metrics"]["Model"] == name, "F1"].iloc[0]
+        c3.metric("Test F1", f"{f1:.4f}")
+
+        st.caption(
+            f"**{name}** · {save_horizon} · imbalance `{method}` · threshold `{threshold}` · "
+            f"{len(h_save['feature_names'])} features."
+        )
+
+        payload = {
+            "model": model,
+            "model_name": name,
+            "horizon": save_horizon,
+            "threshold": threshold,
+            "imbalance": method,
+            "best_params": h_save["best_params"].get(name, {}),
+            "features": h_save["feature_names"],
+            "metrics": h_save["metrics"].loc[h_save["metrics"]["Model"] == name].to_dict("records")[0],
+        }
+        st.download_button(
+            "⬇️ Download .joblib",
+            data=_serialize(payload),
+            file_name=f"{name}_{save_horizon}.joblib",
+            mime="application/octet-stream",
+            key="dl_model",
+        )
