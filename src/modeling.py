@@ -56,11 +56,11 @@ warnings.filterwarnings("ignore", category=ConvergenceWarning)
 warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
 
 # Bump to invalidate cached modelling results whenever the modelling logic changes.
-_MODELING_VERSION = "2026-10-06-modelling-spec"
+_MODELING_VERSION = "2026-10-07-fast"
 
-CV_SPLITS = 5          # 时间交叉验证折数
-SEARCH_CV_SPLITS = 3   # 超参数搜索内部折数（较小时控制时间）
-SUBSAMPLE = 25_000     # 训练集子采样（控制时间）
+CV_SPLITS = 5          # 时间交叉验证折数（规范要求 5 折）
+SEARCH_CV_SPLITS = 2   # 超参数搜索内部折数（控制时间）
+SUBSAMPLE = 10_000     # 训练集子采样（控制时间 ~3 分钟）
 THRESHOLD_GRID = np.round(np.linspace(0.10, 0.90, 17), 3)  # 决策阈值网格
 
 MODEL_NAMES = ["LogisticRegression", "RandomForest", "XGBoost", "KNN", "NeuralNetwork"]
@@ -81,7 +81,7 @@ def _base_model(name: str):
     if name == "KNN":
         return KNeighborsClassifier(n_jobs=-1)
     if name == "NeuralNetwork":
-        return MLPClassifier(hidden_layer_sizes=(64,), max_iter=300, alpha=1e-3,
+        return MLPClassifier(hidden_layer_sizes=(64,), max_iter=200, alpha=1e-3,
                              early_stopping=True, n_iter_no_change=10, random_state=42)
     raise ValueError(f"Unknown model: {name}")
 
@@ -178,13 +178,13 @@ _PARAM_GRIDS = {
         "subsample": [0.8, 1.0],
     },
     "NeuralNetwork": {
-        "hidden_layer_sizes": [(32,), (64,), (64, 32)],
-        "alpha": [1e-4, 1e-3],
+        "hidden_layer_sizes": [(32,), (64,)],
+        "alpha": [1e-3],
     },
 }
 
 
-def _search_params(name: str, X, y, method: str, spw: float, n_iter: int = 6) -> tuple[dict, float]:
+def _search_params(name: str, X, y, method: str, spw: float, n_iter: int = 4) -> tuple[dict, float]:
     """对单个模型做随机搜索（时间交叉验证），返回 (best_params, best_f1)。"""
     model = _make_model(name, method, spw, None)
     X_use, y_use = X, y
@@ -405,13 +405,16 @@ def run_modeling(_cache_version: str = _MODELING_VERSION) -> dict:
     j1 = _run_horizon(X_train, X_test, y_train, y_test, test_locations, spw)
     j2 = _run_horizon(X_train2, X_test2, y_train2, y_test2, test_locations, spw2)
 
+    n_full = int(len(X_train))
     return {
         "j1": j1,
         "j2": j2,
         "scale_pos_weight": round(spw, 4),
         "scale_pos_weight2": round(spw2, 4),
-        "n_train": int(len(X_train)),
-        "subsampled": bool(len(X_train) > SUBSAMPLE),
+        "n_train_full": n_full,
+        "n_train_used": min(SUBSAMPLE, n_full),
+        "n_test": int(len(X_test)),
+        "subsampled": bool(n_full > SUBSAMPLE),
     }
 
 
@@ -524,11 +527,12 @@ def render() -> None:
         "search, threshold optimisation, and a full evaluation — repeated for the J+1 and J+2 targets."
     )
 
-    if m["subsampled"]:
-        st.info(
-            f"Training uses a {m['n_train']:,}-row subsample to keep the pipeline responsive. "
-            "Metrics are indicative; the full-data XGBoost models live under `models/`."
-        )
+    st.info(
+        f"**Data volume** — full training set **{m['n_train_full']:,}** rows (≤ 2015-11-09), test set "
+        f"**{m['n_test']:,}** rows. To keep this page under ~3 minutes, modelling trains on a "
+        f"**{m['n_train_used']:,}-row random subsample** of the training set — metrics are indicative, and the "
+        "full-data XGBoost models live under `models/`."
+    )
 
     j1, j2 = m["j1"], m["j2"]
 
