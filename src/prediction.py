@@ -397,11 +397,19 @@ def render() -> None:
         from src import forecast as _forecast
         from src import pipeline as _pipeline
 
+        st.markdown("**Training — the pipeline data flow:**")
+        with st.expander("`build_targets()` — load + build the 4 targets (J+1/J+2)", expanded=False):
+            st.code(inspect.getsource(_pipeline.build_targets), language="python")
+
+        with st.expander("`fit_transformer()` — per-station imputation stats + Location rain-rates", expanded=False):
+            st.code(inspect.getsource(_pipeline.fit_transformer), language="python")
+
         with st.expander("`transform()` — shared feature encoding (training & inference)", expanded=False):
             st.code(inspect.getsource(_pipeline.transform), language="python")
 
-        with st.expander("`train_and_save()` — training the 4 XGBoost models and saving them", expanded=False):
+        with st.expander("`train_and_save()` — train the 4 XGBoost models and save them", expanded=False):
             st.code(inspect.getsource(_pipeline.train_and_save), language="python")
 
+        st.markdown("**Inference:**")
         with st.expander("`predict_row()` — inference reusing the saved transformer", expanded=False):
             st.code(inspect.getsource(_forecast.predict_row), language="python")
